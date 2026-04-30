@@ -150,7 +150,9 @@ class UnitreeNode(RealNode):
         if (msg.keys & robot_cfgs.UnitreeWirelessButtons.R2) or (
             msg.keys & robot_cfgs.UnitreeWirelessButtons.L2
         ):  # R2 or L2 is pressed
-            self.get_logger().warn("R2 or L2 is pressed, the motors and this process shuts down.")
+            self.get_logger().warn(
+                f"R2 or L2 is pressed (keys=0x{msg.keys:04x}), the motors and this process shuts down."
+            )
             self._turn_off_motors()
             raise SystemExit()
 

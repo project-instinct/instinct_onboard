@@ -224,6 +224,10 @@ class RealNode(Node):
             )
         self._publish_motor_cmd(target_joint_pos, p_gains=p_gains, d_gains=d_gains)
 
+    def clear_action_buffer(self):
+        """Clear last-action observations without sending any motor command."""
+        self.action[:] = 0.0
+
     @abstractmethod
     def _publish_motor_cmd(self, target_joint_pos: np.array, p_gains: np.array, d_gains: np.array):
         """Publish the joint commands to the robot motors in robot coordinates system.

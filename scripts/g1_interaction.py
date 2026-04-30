@@ -146,6 +146,8 @@ class G1InteractionNode(UnitreeRsCameraNode):
         self,
         *args,
         motion_vis: bool = False,
+        interaction_startup_step_size: float = 0.2,
+        interaction_kpkd_factor: float = 1.0,
         **kwargs,
     ):
         """Initialize the G1 interaction node.
@@ -160,6 +162,9 @@ class G1InteractionNode(UnitreeRsCameraNode):
         self.current_agent_name: str | None = None
         self.motion_vis = motion_vis
         self._motion_file_list = []  # List of available motion files
+        self.interaction_startup_step_size = interaction_startup_step_size
+        self.interaction_kpkd_factor = interaction_kpkd_factor
+        self.interaction_cold_start_agent = None
 
     def register_agent(self, name: str, agent):
         """Register an agent with the node.
@@ -287,6 +292,28 @@ class G1InteractionNode(UnitreeRsCameraNode):
                 self.get_logger().info("RIGHT button pressed, switching to interaction agent.")
                 self._switch_to_interaction_motion(3)
 
+        # Handle interaction cold start agent
+        elif self.current_agent_name == "interaction_cold_start":
+            if self.joy_stick_data.L1 and "walk" in self.available_agents:
+                self.get_logger().info("L1 button pressed, aborting interaction cold start and switching to walk agent.")
+                self.interaction_cold_start_agent = None
+                self.current_agent_name = "walk"
+                self.available_agents[self.current_agent_name].reset()
+            else:
+                action, done = self.interaction_cold_start_agent.step()
+                self.send_action(
+                    action,
+                    self.interaction_cold_start_agent.action_offset,
+                    self.interaction_cold_start_agent.action_scale,
+                    self.interaction_cold_start_agent.p_gains,
+                    self.interaction_cold_start_agent.d_gains,
+                )
+                if done:
+                    self.get_logger().info("Interaction cold start done, switching to interaction policy.")
+                    self.clear_action_buffer()
+                    self.interaction_cold_start_agent = None
+                    self.current_agent_name = "interaction"
+
         # Handle interaction agent
         elif self.current_agent_name == "interaction":
             action, done = self.available_agents[self.current_agent_name].step()
@@ -357,8 +384,13 @@ class G1InteractionNode(UnitreeRsCameraNode):
                 f"Motion index {motion_index} out of range, using default motion"
             )
         
-        self.current_agent_name = "interaction"
-        self.available_agents[self.current_agent_name].reset(motion_name)
+        interaction_agent = self.available_agents["interaction"]
+        interaction_agent.reset(motion_name)
+        self.interaction_cold_start_agent = interaction_agent.get_cold_start_agent(
+            startup_step_size=self.interaction_startup_step_size,
+            kpkd_factor=self.interaction_kpkd_factor,
+        )
+        self.current_agent_name = "interaction_cold_start"
 
     def vis_callback(self):
         """Visualization callback for publishing motion sequence as JointState.
@@ -416,6 +448,8 @@ def main(args):
         joint_pos_protect_ratio=2.0,
         robot_class_name="G1_29Dof_TorsoBase",
         motion_vis=args.motion_vis,
+        interaction_startup_step_size=args.startup_step_size,
+        interaction_kpkd_factor=args.kpkd_factor,
         dryrun=not args.nodryrun,
     )
 

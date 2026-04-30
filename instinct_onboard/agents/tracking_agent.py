@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import math
 import os
-from dataclasses import dataclass
-from typing import Dict, List
 
 import cv2
 import numpy as np
@@ -15,79 +12,15 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from tf2_ros import StaticTransformBroadcaster
 
 from instinct_onboard.agents.base import ColdStartAgent, OnboardAgent
+from instinct_onboard.motion_utils import MotionData, load_motion_data
 from instinct_onboard.normalizer import Normalizer
 from instinct_onboard.ros_nodes.base import RealNode
 from instinct_onboard.utils import (
     inv_quat,
     quat_rotate_inverse,
-    quat_slerp_batch,
     quat_to_tan_norm_batch,
     yaw_quat,
 )
-
-
-@dataclass
-class MotionData:
-    framerate: float
-    # Joint orders must match the robot joint names in simulation order.
-    joint_pos: np.ndarray
-    joint_vel: np.ndarray
-    base_pos: np.ndarray
-    base_quat: np.ndarray
-    total_num_frames: int
-
-
-def load_motion_data(motion_file: str, robot_joint_names: list[str], target_framerate: float) -> MotionData:
-    motion_data = np.load(motion_file, allow_pickle=True)
-    framerate = motion_data["framerate"].item()
-
-    motion_joint_names_all = motion_data["joint_names"].tolist()
-    motion_joint_to_robot_joint_ids = [motion_joint_names_all.index(j_name) for j_name in robot_joint_names]
-
-    joint_pos = motion_data["joint_pos"][:, motion_joint_to_robot_joint_ids]
-    joint_pos_ = np.concatenate([joint_pos[0:1], joint_pos])
-    joint_vel = (joint_pos_[1:] - joint_pos_[:-1]) * framerate
-    base_pos = motion_data["base_pos_w"]
-    base_quat = motion_data["base_quat_w"]
-    total_num_frames = motion_data["joint_pos"].shape[0]
-
-    motion = MotionData(
-        framerate=framerate,
-        joint_pos=joint_pos,
-        joint_vel=joint_vel,
-        base_pos=base_pos,
-        base_quat=base_quat,
-        total_num_frames=total_num_frames,
-    )
-
-    return match_framerate(motion, target_framerate)
-
-
-def match_framerate(motion_data: MotionData, target_framerate: float) -> MotionData:
-    if motion_data.framerate == target_framerate:
-        return motion_data
-
-    motion_length_s = motion_data.total_num_frames / motion_data.framerate
-    new_total_num_frames = math.floor(motion_length_s * target_framerate)
-    new_frame_idxs = np.linspace(0, motion_data.total_num_frames - 1, new_total_num_frames)
-    floor = np.floor(new_frame_idxs).astype(int)
-    ceil = np.ceil(new_frame_idxs).astype(int)
-    frac = new_frame_idxs - floor
-
-    new_joint_pos = (1 - frac)[:, None] * motion_data.joint_pos[floor] + frac[:, None] * motion_data.joint_pos[ceil]
-    joint_pos_ = np.concatenate([new_joint_pos[0:1], new_joint_pos])
-    new_joint_vel = (joint_pos_[1:] - joint_pos_[:-1]) * target_framerate
-    new_base_pos = (1 - frac)[:, None] * motion_data.base_pos[floor] + frac[:, None] * motion_data.base_pos[ceil]
-    new_base_quat = quat_slerp_batch(motion_data.base_quat[floor], motion_data.base_quat[ceil], frac)
-
-    return MotionData(
-        framerate=target_framerate,
-        joint_pos=new_joint_pos.astype(np.float32),
-        joint_vel=new_joint_vel.astype(np.float32),
-        base_pos=new_base_pos.astype(np.float32),
-        base_quat=new_base_quat.astype(np.float32),
-        total_num_frames=new_total_num_frames,
-    )
 
 
 class TrackerAgent(OnboardAgent):
@@ -124,11 +57,15 @@ class TrackerAgent(OnboardAgent):
     def _load_all_motions(self, motion_file_dir: str):
         """Load the motion file."""
         self.all_motion_datas: dict[str, MotionData] = dict()
+        velocity_estimation_method = self._get_velocity_estimation_method()
         for motion_file in sorted(os.listdir(motion_file_dir)):
             if not motion_file.endswith(".npz"):
                 continue
             motion = load_motion_data(
-                os.path.join(motion_file_dir, motion_file), self.ros_node.sim_joint_names, self.target_motion_framerate
+                os.path.join(motion_file_dir, motion_file),
+                self.ros_node.sim_joint_names,
+                self.target_motion_framerate,
+                velocity_estimation_method=velocity_estimation_method,
             )
             self.all_motion_datas[motion_file] = motion
         if not self.all_motion_datas:
@@ -152,6 +89,13 @@ class TrackerAgent(OnboardAgent):
 
         self.motion_cursor_idx = 0
 
+    def _get_velocity_estimation_method(self):
+        motion_buffers = self.cfg["scene"]["motion_reference"].get("motion_buffers", {})
+        if len(motion_buffers) != 1:
+            return "backward"
+        motion_buffer_cfg = next(iter(motion_buffers.values()))
+        return motion_buffer_cfg.get("velocity_estimation_method", "backward")
+
     def reset(self, motion_name: str = None):
         """Reset the agent state and the rosbag reader."""
         super().reset()
@@ -168,18 +112,18 @@ class TrackerAgent(OnboardAgent):
 
     def step(self):
         """Perform a single step of the agent."""
-        self.motion_cursor_idx += 1
         done = self.get_done()
-        self.motion_cursor_idx = (
-            self.motion_cursor_idx
-            if self.motion_cursor_idx < self.motion_data.total_num_frames
-            else self.motion_data.total_num_frames - 1
-        )
         obs = self._get_observation()
         normalized_obs = self.normalizer.normalize(obs).astype(np.float32)[None, :]
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: normalized_obs})[0]
         action = action.reshape(-1)
+        self.motion_cursor_idx += 1
+        self.motion_cursor_idx = (
+            self.motion_cursor_idx
+            if self.motion_cursor_idx < self.motion_data.total_num_frames
+            else self.motion_data.total_num_frames - 1
+        )
         return action, done
 
     def match_to_current_heading(self):
@@ -324,13 +268,7 @@ class PerceptiveTrackerAgent(TrackerAgent):
             self.depth_image_slice = self._get_obs_slice("depth_image")
 
     def step(self):
-        self.motion_cursor_idx += 1
         done = self.get_done()
-        self.motion_cursor_idx = (
-            self.motion_cursor_idx
-            if self.motion_cursor_idx < self.motion_data.total_num_frames
-            else self.motion_data.total_num_frames - 1
-        )
         obs = self._get_observation()
         normalized_obs = self.normalizer.normalize(obs).astype(np.float32)[None, :]
         depth_image = normalized_obs[:, self.depth_image_slice].reshape(
@@ -351,6 +289,12 @@ class PerceptiveTrackerAgent(TrackerAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: actor_input})[0]
         action = action.reshape(-1)
+        self.motion_cursor_idx += 1
+        self.motion_cursor_idx = (
+            self.motion_cursor_idx
+            if self.motion_cursor_idx < self.motion_data.total_num_frames
+            else self.motion_data.total_num_frames - 1
+        )
 
         if self.debug_depth_publisher is not None:
             # NOTE: the +5.0 is a empirical value to ensure the normalized obs is not negative.
