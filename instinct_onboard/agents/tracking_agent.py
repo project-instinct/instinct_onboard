@@ -40,8 +40,42 @@ class TrackerAgent(OnboardAgent):
         self.ort_sessions: dict[str, ort.InferenceSession] = dict()
         self._parse_obs_config()
         self._parse_action_config()
+        self._configure_policy_joint_order()
         self._load_models()
         self._load_all_motions(motion_file_dir)
+
+    def _get_policy_joint_names(self) -> list[str]:
+        return list(self.ros_node.sim_joint_names)
+
+    def _configure_policy_joint_order(self) -> None:
+        self.policy_joint_names = self._get_policy_joint_names()
+        if len(self.policy_joint_names) != self.ros_node.NUM_JOINTS:
+            raise ValueError(
+                f"Policy joint order has {len(self.policy_joint_names)} joints, "
+                f"but robot has {self.ros_node.NUM_JOINTS}."
+            )
+        missing = set(self.policy_joint_names) - set(self.ros_node.sim_joint_names)
+        extra = set(self.ros_node.sim_joint_names) - set(self.policy_joint_names)
+        if missing or extra:
+            raise ValueError(
+                "Policy joint names must be the same set as onboard joint names. "
+                f"Missing from onboard: {sorted(missing)}; missing from policy: {sorted(extra)}."
+            )
+        self.policy_to_onboard_joint_ids = np.array(
+            [self.ros_node.sim_joint_names.index(joint_name) for joint_name in self.policy_joint_names],
+            dtype=np.int64,
+        )
+        self.default_joint_pos_policy = self._onboard_joint_array_to_policy_order(self.default_joint_pos)
+        self.default_joint_vel_policy = self._onboard_joint_array_to_policy_order(self.default_joint_vel)
+
+    def _onboard_joint_array_to_policy_order(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(values)[..., self.policy_to_onboard_joint_ids]
+
+    def _policy_joint_array_to_onboard_order(self, values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values)
+        reordered = np.empty_like(values)
+        reordered[..., self.policy_to_onboard_joint_ids] = values
+        return reordered
 
     def _load_models(self):
         """Load the ONNX model for the agent."""
@@ -63,7 +97,7 @@ class TrackerAgent(OnboardAgent):
                 continue
             motion = load_motion_data(
                 os.path.join(motion_file_dir, motion_file),
-                self.ros_node.sim_joint_names,
+                self.policy_joint_names,
                 self.target_motion_framerate,
                 velocity_estimation_method=velocity_estimation_method,
             )
@@ -118,6 +152,7 @@ class TrackerAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: normalized_obs})[0]
         action = action.reshape(-1)
+        action = self._policy_joint_array_to_onboard_order(action)
         self.motion_cursor_idx += 1
         self.motion_cursor_idx = (
             self.motion_cursor_idx
@@ -154,7 +189,7 @@ class TrackerAgent(OnboardAgent):
     def _get_joint_pos_ref_command_cmd_obs(self):
         frame_indices = self.motion_frame_indices_offset + self.motion_cursor_idx
         frame_indices = frame_indices.clip(max=self.motion_data.total_num_frames - 1)
-        return self.motion_data.joint_pos[frame_indices] - self.default_joint_pos[None, :]
+        return self.motion_data.joint_pos[frame_indices] - self.default_joint_pos_policy[None, :]
 
     def _get_joint_vel_ref_command_cmd_obs(self):
         frame_indices = self.motion_frame_indices_offset + self.motion_cursor_idx
@@ -188,7 +223,7 @@ class TrackerAgent(OnboardAgent):
 
     def get_cold_start_agent(self, startup_step_size: float = 0.2, kpkd_factor: float = 1.0) -> ColdStartAgent:
         """Create a ColdStartAgent with joint_target_pos set to the 0-th frame of the motion."""
-        joint_target_pos = self.motion_data.joint_pos[0].copy()
+        joint_target_pos = self._policy_joint_array_to_onboard_order(self.motion_data.joint_pos[0]).copy()
         return ColdStartAgent(
             startup_step_size=startup_step_size,
             ros_node=self.ros_node,
@@ -198,6 +233,18 @@ class TrackerAgent(OnboardAgent):
             p_gains=self.p_gains * kpkd_factor,
             d_gains=self.d_gains * kpkd_factor,
         )
+
+    def _get_joint_pos_rel_obs(self) -> np.ndarray:
+        """Return joint positions in the policy joint order."""
+        return self._onboard_joint_array_to_policy_order(self.ros_node.joint_pos_) - self.default_joint_pos_policy
+
+    def _get_joint_vel_rel_obs(self) -> np.ndarray:
+        """Return joint velocities in the policy joint order."""
+        return self._onboard_joint_array_to_policy_order(self.ros_node.joint_vel_) - self.default_joint_vel_policy
+
+    def _get_last_action_obs(self) -> np.ndarray:
+        """Return last actions in the policy joint order."""
+        return self._onboard_joint_array_to_policy_order(self.ros_node.action)
 
 
 class PerceptiveTrackerAgent(TrackerAgent):
@@ -289,6 +336,7 @@ class PerceptiveTrackerAgent(TrackerAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: actor_input})[0]
         action = action.reshape(-1)
+        action = self._policy_joint_array_to_onboard_order(action)
         self.motion_cursor_idx += 1
         self.motion_cursor_idx = (
             self.motion_cursor_idx

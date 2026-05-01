@@ -411,7 +411,7 @@ class G1InteractionNode(UnitreeRsCameraNode):
         # Publish JointState for target joints
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
-        js.name = self.sim_joint_names
+        js.name = getattr(agent, "policy_joint_names", self.sim_joint_names)
         joint_pos = agent.motion_data.joint_pos[cursor]
         joint_vel = agent.motion_data.joint_vel[cursor]
         js.position = joint_pos.tolist()
