@@ -10,6 +10,7 @@ from std_msgs.msg import Float32MultiArray, String
 from tf2_ros import StaticTransformBroadcaster
 
 from instinct_onboard import robot_cfgs
+from instinct_onboard.target_joint_state import TargetJointState
 
 
 @dataclass
@@ -102,6 +103,8 @@ class RealNode(Node):
 
         # action buffer
         self.action = np.zeros(self.NUM_ACTIONS, dtype=np.float32)
+        self.last_sent_target_joint_state: TargetJointState | None = None
+        self._send_action_deprecated_warned = False
 
         # hardware related, in simulation order
         self.joint_signs = getattr(
@@ -193,6 +196,66 @@ class RealNode(Node):
 
         return np.clip(target_joint_pos, action_low, action_high)
 
+    def _expand_to_full_joint_array(self, values: np.ndarray | float, field_name: str) -> np.ndarray:
+        values_arr = np.asarray(values, dtype=np.float32).reshape(-1)
+        if values_arr.shape == (1,):
+            return np.full(self.NUM_JOINTS, values_arr[0].item(), dtype=np.float32)
+        if values_arr.shape == (self.NUM_JOINTS,):
+            return values_arr.copy()
+        raise ValueError(f"{field_name} must be scalar or shape ({self.NUM_JOINTS},), got {values_arr.shape}")
+
+    def send_target_joint_state(self, target_joint_state: TargetJointState) -> bool:
+        """Publish a full-size TargetJointState to the hardware.
+
+        The incoming ``target_joint_state`` is expected to be full-size (``num_joints ==
+        NUM_JOINTS``); agents build it by aggregating per-joint action terms and a
+        default-PD term, so no defaults need to be merged here. On success,
+        ``last_sent_target_joint_state`` is updated so observations can replay the
+        last command.
+        """
+        if len(target_joint_state) != self.NUM_JOINTS:
+            self.get_logger().error(
+                f"TargetJointState num_joints mismatch: expected {self.NUM_JOINTS}, got {target_joint_state.num_joints}"
+            )
+            return False
+
+        if target_joint_state.isnan_any:
+            self.get_logger().error("Target joint state contains NaN, skip sending command.")
+            return False
+
+        target_joint_state = target_joint_state.as_dtype(np.float32)
+
+        p_gains = np.clip(target_joint_state.kp * self.kp_factor, 0.0, self.kp_clip)
+        d_gains = np.clip(target_joint_state.kd * self.kd_factor, 0.0, self.kd_clip)
+        target_joint_pos_send = target_joint_state.position.copy()
+        if self.computer_clip_torque:
+            target_joint_pos_send = self.clip_by_torque_limit(
+                target_joint_pos_send,
+                p_gains=p_gains,
+                d_gains=d_gains,
+            )
+            if (target_joint_pos_send != target_joint_state.position).any():
+                self.get_logger().info("Action clipped by torque limits.")
+
+        send_ok = self._publish_motor_cmd(
+            target_joint_pos=target_joint_pos_send,
+            target_joint_vel=target_joint_state.velocity,
+            target_joint_effort=target_joint_state.effort,
+            p_gains=p_gains,
+            d_gains=d_gains,
+        )
+        if not send_ok:
+            return False
+
+        self.last_sent_target_joint_state = TargetJointState(
+            position=target_joint_state.position.copy(),
+            velocity=target_joint_state.velocity.copy(),
+            effort=target_joint_state.effort.copy(),
+            kp=target_joint_state.kp.copy(),
+            kd=target_joint_state.kd.copy(),
+        )
+        return True
+
     def send_action(
         self,
         action: np.array,
@@ -200,35 +263,71 @@ class RealNode(Node):
         action_scale: np.ndarray = 1.0,
         p_gains: np.ndarray = 0.0,
         d_gains: np.ndarray = 0.0,
-    ):
-        """Send the action to the robot motors, which does the preprocessing
-        just like env.step in simulation.
-        However, since this process only controls one robot, the action is not batched.
-        NOTE: when switching between agents, the last_action term should be shared between agents.
-        Thus, the ros node has to update the action buffer
+    ) -> bool:
+        """Legacy full-joint position command path (compatibility only).
+
+        This API assumes policy action layout is exactly one position scalar per
+        joint (``NUM_ACTIONS == NUM_JOINTS``) and applies ``target_pos = action *
+        action_scale + action_offset`` before delegating to
+        ``send_target_joint_state``. New code should use ``send_target_joint_state``
+        directly.
         """
-        # NOTE: Only calling this function currently will update self.actions for self._get_last_action_obs
-        self.action[:] = action
-        self.action_publisher.publish(Float32MultiArray(data=action))
-        action_scaled = action * action_scale
-        target_joint_pos = action_scaled + action_offset
-        p_gains = np.clip(p_gains * self.kp_factor, 0.0, self.kp_clip)
-        d_gains = np.clip(d_gains * self.kd_factor, 0.0, self.kd_clip)
-        if np.isnan(action).any():
-            self.get_logger().error("Actions contain NaN, Skip sending the action to the robot.")
-            return
-        if self.computer_clip_torque:
-            target_joint_pos = self.clip_by_torque_limit(
-                target_joint_pos,
-                p_gains=p_gains,
-                d_gains=d_gains,
+        if self.NUM_ACTIONS != self.NUM_JOINTS:
+            self.get_logger().error(
+                "send_action only supports legacy full-joint position layout: "
+                f"NUM_ACTIONS ({self.NUM_ACTIONS}) must equal NUM_JOINTS ({self.NUM_JOINTS}). "
+                "Use send_target_joint_state for manager-based action terms."
             )
-        self._publish_motor_cmd(target_joint_pos, p_gains=p_gains, d_gains=d_gains)
+            return False
+
+        if not self._send_action_deprecated_warned:
+            self.get_logger().warn(
+                "send_action is deprecated compatibility API. Prefer send_target_joint_state.",
+                throttle_duration_sec=5.0,
+            )
+            self._send_action_deprecated_warned = True
+
+        action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+        if action_arr.shape != (self.NUM_ACTIONS,):
+            self.get_logger().error(
+                f"Action shape mismatch in send_action: expected ({self.NUM_ACTIONS},), got {action_arr.shape}"
+            )
+            return False
+        # NOTE: compatibility path keeps raw action history for legacy observations.
+        self.action[:] = action_arr
+        self.action_publisher.publish(Float32MultiArray(data=action_arr.tolist()))
+
+        action_scale_arr = self._expand_to_full_joint_array(action_scale, "action_scale")
+        action_offset_arr = self._expand_to_full_joint_array(action_offset, "action_offset")
+        target_joint_pos = action_arr * action_scale_arr + action_offset_arr
+        target_joint_vel = np.zeros(self.NUM_JOINTS, dtype=np.float32)
+        target_joint_effort = np.zeros(self.NUM_JOINTS, dtype=np.float32)
+        p_gains_arr = self._expand_to_full_joint_array(p_gains, "p_gains")
+        d_gains_arr = self._expand_to_full_joint_array(d_gains, "d_gains")
+
+        return self.send_target_joint_state(
+            TargetJointState(
+                position=target_joint_pos,
+                velocity=target_joint_vel,
+                effort=target_joint_effort,
+                kp=p_gains_arr,
+                kd=d_gains_arr,
+            )
+        )
 
     @abstractmethod
-    def _publish_motor_cmd(self, target_joint_pos: np.array, p_gains: np.array, d_gains: np.array):
+    def _publish_motor_cmd(
+        self,
+        target_joint_pos: np.array,
+        target_joint_vel: np.array,
+        target_joint_effort: np.array,
+        p_gains: np.ndarray,
+        d_gains: np.ndarray,
+    ) -> bool:
         """Publish the joint commands to the robot motors in robot coordinates system.
-        robot_coordinates_action: shape (NUM_JOINTS,), in simulation order.
+
+        All arrays are in simulation order with shape (NUM_JOINTS,).
+        Returns True on success, False on failure (e.g. NaN values).
         """
         pass
 
