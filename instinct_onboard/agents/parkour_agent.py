@@ -211,7 +211,7 @@ class ParkourAgent(OnboardAgent):
     Agent specific observation functions for Parkour Agent.
     """
 
-    def _get_base_velocity_obs(self):
+    def _get_base_velocity_cmd_obs(self):
         """Return shape: (3,)"""
         # left-y for forward/backward
         ly = self.ros_node.joy_stick_data.ly

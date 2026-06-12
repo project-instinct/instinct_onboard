@@ -65,13 +65,9 @@ class WalkAgent(OnboardAgent):
     Agent specific observation functions for WalkAgent.
     """
 
-    def _get_base_velocity_command_cmd_obs(self):
+    def _get_base_velocity_cmd_obs(self):
         """Return the base velocity command (from joystick)"""
         x_vel = self.ros_node.joy_stick_data.ly * self.x_vel_scale
         y_vel = -self.ros_node.joy_stick_data.lx * self.y_vel_scale
         yaw_vel = -self.ros_node.joy_stick_data.rx * self.yaw_vel_scale
         return np.array([x_vel, y_vel, yaw_vel])
-
-    def _get_base_velocity_cmd_obs(self):
-        """An alias for _get_base_velocity_command_obs"""
-        return self._get_base_velocity_command_cmd_obs()
