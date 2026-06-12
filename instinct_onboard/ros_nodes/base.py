@@ -6,7 +6,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray, String
+from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster
 
 from instinct_onboard import robot_cfgs
@@ -66,7 +66,6 @@ class RealNode(Node):
             raise ValueError("robot_class_name must be provided")
 
         self.NUM_JOINTS = getattr(robot_cfgs, robot_class_name).NUM_JOINTS
-        self.NUM_ACTIONS = getattr(robot_cfgs, robot_class_name).NUM_ACTIONS
         self.computer_clip_torque = computer_clip_torque
         self.joint_pos_protect_ratio = joint_pos_protect_ratio
         self.kp_factor = kp_factor
@@ -101,10 +100,7 @@ class RealNode(Node):
         )  # in robot urdf coordinate, but in simulation order. no offset subtracted
         self.joint_vel_ = np.zeros(self.NUM_JOINTS, dtype=np.float32)
 
-        # action buffer
-        self.action = np.zeros(self.NUM_ACTIONS, dtype=np.float32)
         self.last_sent_target_joint_state: TargetJointState | None = None
-        self._send_action_deprecated_warned = False
 
         # hardware related, in simulation order
         self.joint_signs = getattr(
@@ -124,7 +120,6 @@ class RealNode(Node):
         """
         # Common publishers
         self.debug_msg_publisher = self.create_publisher(String, "/debug_msg", 10)
-        self.action_publisher = self.create_publisher(Float32MultiArray, "/raw_actions", 10)
 
     @property
     def joy_stick_data(self) -> JoyStickData:
@@ -173,9 +168,6 @@ class RealNode(Node):
         """
         return self.joint_vel_ - np.zeros(self.NUM_JOINTS, dtype=np.float32)  # shape (NUM_JOINTS,)
 
-    def _get_last_action_obs(self):
-        return self.action  # shape (NUM_ACTIONS,)
-
     """
     Functions that actually publish the commands and take effect
     """
@@ -195,14 +187,6 @@ class RealNode(Node):
         action_high = (p_limits_high / p_gains) + self.joint_pos_
 
         return np.clip(target_joint_pos, action_low, action_high)
-
-    def _expand_to_full_joint_array(self, values: np.ndarray | float, field_name: str) -> np.ndarray:
-        values_arr = np.asarray(values, dtype=np.float32).reshape(-1)
-        if values_arr.shape == (1,):
-            return np.full(self.NUM_JOINTS, values_arr[0].item(), dtype=np.float32)
-        if values_arr.shape == (self.NUM_JOINTS,):
-            return values_arr.copy()
-        raise ValueError(f"{field_name} must be scalar or shape ({self.NUM_JOINTS},), got {values_arr.shape}")
 
     def send_target_joint_state(self, target_joint_state: TargetJointState) -> bool:
         """Publish a full-size TargetJointState to the hardware.
@@ -255,74 +239,6 @@ class RealNode(Node):
             kd=target_joint_state.kd.copy(),
         )
         return True
-
-    # ------------------------------------------------------------------
-    # Deprecated legacy path — schedule for removal.
-    #
-    # Timeline:
-    #   2026-06  All scripts migrated to send_target_joint_state directly.
-    #   2026-09  (planned) Remove send_action, self.NUM_ACTIONS, and
-    #            self.action from RealNode. Any remaining callers must
-    #            convert to send_target_joint_state + TargetJointState.
-    # ------------------------------------------------------------------
-    def send_action(
-        self,
-        action: np.array,
-        action_offset: np.array = 0.0,
-        action_scale: np.ndarray = 1.0,
-        p_gains: np.ndarray = 0.0,
-        d_gains: np.ndarray = 0.0,
-    ) -> bool:
-        """Legacy full-joint position command path (compatibility only).
-
-        This API assumes policy action layout is exactly one position scalar per
-        joint (``NUM_ACTIONS == NUM_JOINTS``) and applies ``target_pos = action *
-        action_scale + action_offset`` before delegating to
-        ``send_target_joint_state``. New code should use ``send_target_joint_state``
-        directly.
-        """
-        if self.NUM_ACTIONS != self.NUM_JOINTS:
-            self.get_logger().error(
-                "send_action only supports legacy full-joint position layout: "
-                f"NUM_ACTIONS ({self.NUM_ACTIONS}) must equal NUM_JOINTS ({self.NUM_JOINTS}). "
-                "Use send_target_joint_state for manager-based action terms."
-            )
-            return False
-
-        if not self._send_action_deprecated_warned:
-            self.get_logger().warn(
-                "send_action is deprecated compatibility API. Prefer send_target_joint_state.",
-                throttle_duration_sec=5.0,
-            )
-            self._send_action_deprecated_warned = True
-
-        action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
-        if action_arr.shape != (self.NUM_ACTIONS,):
-            self.get_logger().error(
-                f"Action shape mismatch in send_action: expected ({self.NUM_ACTIONS},), got {action_arr.shape}"
-            )
-            return False
-        # NOTE: compatibility path keeps raw action history for legacy observations.
-        self.action[:] = action_arr
-        self.action_publisher.publish(Float32MultiArray(data=action_arr.tolist()))
-
-        action_scale_arr = self._expand_to_full_joint_array(action_scale, "action_scale")
-        action_offset_arr = self._expand_to_full_joint_array(action_offset, "action_offset")
-        target_joint_pos = action_arr * action_scale_arr + action_offset_arr
-        target_joint_vel = np.zeros(self.NUM_JOINTS, dtype=np.float32)
-        target_joint_effort = np.zeros(self.NUM_JOINTS, dtype=np.float32)
-        p_gains_arr = self._expand_to_full_joint_array(p_gains, "p_gains")
-        d_gains_arr = self._expand_to_full_joint_array(d_gains, "d_gains")
-
-        return self.send_target_joint_state(
-            TargetJointState(
-                position=target_joint_pos,
-                velocity=target_joint_vel,
-                effort=target_joint_effort,
-                kp=p_gains_arr,
-                kd=d_gains_arr,
-            )
-        )
 
     @abstractmethod
     def _publish_motor_cmd(

@@ -26,7 +26,6 @@ class UnitreeWirelessButtons:
 
 class G1_29Dof_TorsoBase:
     NUM_JOINTS = 29
-    NUM_ACTIONS = 29
     joint_map = [
         15,
         22,  # shoulder pitch
