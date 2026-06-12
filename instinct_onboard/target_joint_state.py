@@ -32,6 +32,14 @@ class TargetJointState:
     kp: np.ndarray  # element with 0 as disabled
     kd: np.ndarray  # element with 0 as disabled
 
+    def __post_init__(self) -> None:
+        """Validate that all five arrays share the same length."""
+        n = self.position.shape[0]
+        for name in ("velocity", "effort", "kp", "kd"):
+            arr = getattr(self, name)
+            if arr.shape[0] != n:
+                raise ValueError(f"TargetJointState: position has {n} joints but {name} has {arr.shape[0]}")
+
     @property
     def num_joints(self) -> int:
         return self.position.shape[0]

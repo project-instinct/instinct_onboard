@@ -15,7 +15,7 @@ from instinct_onboard.agents.action_term import (
     build_default_uncontrolled_joint_action,
     get_policy_action_dim,
     pack_policy_action_to_target_joint_state,
-    parser_action_cfgs,
+    parse_action_cfgs,
     summarize_action_terms,
 )
 from instinct_onboard.ros_nodes.base import RealNode
@@ -167,7 +167,7 @@ class OnboardAgent(ABC):
             )
 
         # Manager-based action terms (Isaac Lab style): maps policy outputs to joint targets / gains.
-        self._action_terms = parser_action_cfgs(
+        self._action_terms = parse_action_cfgs(
             action_cfgs=self.cfg["actions"],
             ros_node=self.ros_node,
             default_joint_pos=self.default_joint_pos,
@@ -384,16 +384,6 @@ class OnboardAgent(ABC):
             action_terms=self._action_terms,
             default_uncontrolled_joint_action=self._default_uncontrolled_joint_action,
         )
-
-    def record_sent_target_joint_state(self, _target_joint_state: TargetJointState) -> None:
-        """No-op kept for backward compatibility with scripts.
-
-        ``_get_last_action_obs()`` now reads directly from
-        ``ros_node.last_sent_target_joint_state``, which is written by
-        ``send_target_joint_state`` on every successful publish. Callers
-        no longer need to manually record the sent state — the ROS node
-        caches it automatically.
-        """
 
     def _get_last_action_obs(self) -> np.ndarray:
         """On-demand ``last_action`` observation in policy-action space.

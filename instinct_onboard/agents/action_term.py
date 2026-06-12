@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import importlib
 import re
-import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -105,6 +105,17 @@ class ActionTermBase(ABC):
         self._raw_action = np.zeros(self.action_dim, dtype=np.float32)
         self._processed_action = np.zeros_like(self._raw_action)
 
+        # Pre-allocated template for _empty_full_size_arrays; five zero arrays
+        # of shape (NUM_JOINTS,) shared across to_target_joint_state() calls
+        # via copy-on-read to keep each TJS independent.
+        self._empty_arrays_template: dict[str, np.ndarray] = {
+            "position": np.zeros(self._num_joints_total, dtype=np.float32),
+            "velocity": np.zeros(self._num_joints_total, dtype=np.float32),
+            "effort": np.zeros(self._num_joints_total, dtype=np.float32),
+            "kp": np.zeros(self._num_joints_total, dtype=np.float32),
+            "kd": np.zeros(self._num_joints_total, dtype=np.float32),
+        }
+
     """
     Properties.
     """
@@ -183,13 +194,12 @@ class ActionTermBase(ABC):
         )
 
     def _empty_full_size_arrays(self) -> dict[str, np.ndarray]:
-        return {
-            "position": np.zeros(self._num_joints_total, dtype=np.float32),
-            "velocity": np.zeros(self._num_joints_total, dtype=np.float32),
-            "effort": np.zeros(self._num_joints_total, dtype=np.float32),
-            "kp": np.zeros(self._num_joints_total, dtype=np.float32),
-            "kd": np.zeros(self._num_joints_total, dtype=np.float32),
-        }
+        """Return a fresh copy of the pre-allocated zero-array template.
+
+        Each call produces independent arrays so callers can mutate slices
+        without aliasing across ``to_target_joint_state()`` invocations.
+        """
+        return {k: v.copy() for k, v in self._empty_arrays_template.items()}
 
     def _invert_affine(self, target_values: np.ndarray) -> np.ndarray:
         """Invert ``target = raw * scale + offset`` with a zero-scale guard."""
@@ -218,18 +228,18 @@ class JointPositionAction(ActionTermBase):
     """Joint position command; ``position = scale * raw + offset``.
 
     When ``action_cfg['use_default_offset']`` is True (default), the per-joint
-    offset is overridden with ``default_joint_pos`` at the controlled indices,
-    matching Isaac Lab's ``JointPositionAction.use_default_offset``.
-    Controlled joints also receive ``kp``/``kd`` from the agent's configured PD
-    gains so the aggregate :class:`TargetJointState` marks them as active.
+    offset is set to ``default_joint_pos`` at the controlled indices, matching
+    Isaac Lab's ``JointPositionAction.use_default_offset``. Controlled joints
+    also receive ``kp``/``kd`` from the agent's configured PD gains so the
+    aggregate :class:`TargetJointState` marks them as active.
     """
 
     target_field: str = "position"
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def _resolve_default_offset(self, cfg_offset: Any) -> np.ndarray:
         if bool(self.action_cfg.get("use_default_offset", True)):
-            self._offset = self._default_joint_pos[self.joint_indices].copy()
+            return self._default_joint_pos[self.joint_indices].copy()
+        return super()._resolve_default_offset(cfg_offset)
 
     def to_target_joint_state(self) -> TargetJointState:
         fields = self._empty_full_size_arrays()
@@ -277,24 +287,24 @@ class JointVelocityAction(ActionTermBase):
     """Joint velocity command; writes ``velocity`` for controlled joints.
 
     When ``action_cfg['use_default_offset']`` is True, the per-joint offset is
-    overridden with ``default_joint_vel`` at the controlled indices, mirroring
-    Isaac Lab's ``JointVelocityAction.use_default_offset``. Controlled joints
-    also receive ``kd`` from the agent's configured damping gains so the
+    set to ``default_joint_vel`` at the controlled indices, mirroring Isaac
+    Lab's ``JointVelocityAction.use_default_offset``. Controlled joints also
+    receive ``kd`` from the agent's configured damping gains so the
     ``enable_mask`` still marks them as active.
     """
 
     target_field: str = "velocity"
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def _resolve_default_offset(self, cfg_offset: Any) -> np.ndarray:
         if bool(self.action_cfg.get("use_default_offset", False)):
             if self._default_joint_vel is None:
                 raise ValueError(
                     f"Action term '{self.name}': use_default_offset=True but "
                     "default_joint_vel was not provided. "
-                    "Pass default_joint_vel through parser_action_cfgs."
+                    "Pass default_joint_vel through parse_action_cfgs."
                 )
-            self._offset = self._default_joint_vel[self.joint_indices].copy()
+            return self._default_joint_vel[self.joint_indices].copy()
+        return super()._resolve_default_offset(cfg_offset)
 
     def to_target_joint_state(self) -> TargetJointState:
         fields = self._empty_full_size_arrays()
@@ -492,41 +502,62 @@ def _resolve_action_term_cls(name: str, cfg: dict[str, Any]) -> type[ActionTermB
 
     The cfg ``class_type`` string follows IsaacLab's convention, e.g.
     ``"isaaclab.envs.mdp.actions.joint_actions:JointPositionAction"`` or just
-    ``"JointPositionAction"``. The bare class name is looked up directly as an
-    attribute of this module, which is why every concrete subclass is named to
-    end in ``Action`` and matches the IsaacLab class name verbatim.
+    ``"JointPositionAction"``. Resolution is attempted in order:
+
+    1. **`globals()` lookup** — the bare class name is matched against this
+       module's namespace. This is the fast path for locally-defined subclasses.
+
+    2. **`importlib` lookup** — when ``class_type`` contains a module path
+       (``module.submodule:ClassName`` or ``module.submodule.ClassName``), the
+       named module is imported and the class is retrieved from its namespace.
+       This allows third-party / user-defined ``ActionTermBase`` subclasses in
+       external packages to be resolved without polluting this module's imports.
+
+    Raises ``ValueError`` if the ``class_type`` cannot be resolved by either
+    strategy, or if ``class_type`` is missing / empty.
     """
     class_type = str(cfg.get("class_type", ""))
+    if not class_type:
+        raise ValueError(f"Action term '{name}': 'class_type' is required but was missing or empty.")
     bare_name = class_type.rsplit(":", 1)[-1].rsplit(".", 1)[-1].strip()
+
+    # Strategy 1 — globals() lookup (fast path for local subclasses).
     cls = globals().get(bare_name)
     if isinstance(cls, type) and issubclass(cls, ActionTermBase) and cls is not ActionTermBase:
         return cls
 
-    # --- Fallback heuristic when class_type is missing or unknown ---
-    if class_type:
-        # An explicit class_type was provided but didn't resolve — fail loud to
-        # catch typos (e.g. "JontPositionAction") or stale fully-qualified paths.
-        raise ValueError(
-            f"Action term '{name}': class_type '{class_type}' did not resolve to "
-            f"a concrete ActionTermBase subclass in this module. "
-            f"Resolved bare name: '{bare_name}'. "
-            f"Check for typos or missing imports."
-        )
-    # No class_type given — infer from the term name via keyword matching.
-    warnings.warn(
-        f"Action term '{name}': no class_type specified. "
-        f"Falling back to heuristic (name-based keyword match). "
-        f"Set class_type explicitly to suppress this warning."
+    # Strategy 2 — importlib lookup for fully-qualified class_type strings
+    # (e.g. "mypackage.actions:MyCustomAction").
+    module_path, _, attr = class_type.partition(":")
+    if not attr:
+        # "a.b.ClassName" form — treat the last segment as the class name.
+        parts = module_path.rsplit(".", 1)
+        if len(parts) == 2:
+            module_path, attr = parts
+    if module_path and attr:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ValueError(
+                f"Action term '{name}': could not import module '{module_path}' " f"from class_type '{class_type}'."
+            ) from exc
+        imported_cls = getattr(module, attr, None)
+        if (
+            isinstance(imported_cls, type)
+            and issubclass(imported_cls, ActionTermBase)
+            and imported_cls is not ActionTermBase
+        ):
+            return imported_cls
+
+    raise ValueError(
+        f"Action term '{name}': class_type '{class_type}' did not resolve to "
+        f"a concrete ActionTermBase subclass. "
+        f"Resolved bare name: '{bare_name}'. "
+        f"Check for typos, missing imports, or verify the module is importable."
     )
-    probe_lower = name.lower()
-    if "velocity" in probe_lower:
-        return JointVelocityAction
-    if "effort" in probe_lower or "torque" in probe_lower:
-        return JointEffortAction
-    return JointPositionAction
 
 
-def parser_action_cfgs(
+def parse_action_cfgs(
     action_cfgs: dict[str, dict[str, Any]],
     ros_node: RealNode,
     default_joint_pos: np.ndarray,
@@ -542,7 +573,14 @@ def parser_action_cfgs(
     - within a term, the first matching regex in ``joint_names`` wins.
 
     The parser enforces that no two terms write to the same
-    ``(target_field, joint_index)`` pair.
+    ``(target_field, joint_index)`` pair. This per-``(field, index)`` check
+    intentionally allows two terms to control the **same joint** when they write
+    **different** target fields (e.g. position vs. velocity). This is valid for
+    a single agent whose model training may design for joint-multiplexed
+    control. Note however that this does **not** support multi-agent
+    composition: :meth:`TargetJointState.__add__` enforces disjoint
+    ``enable_mask`` at the joint level, so two independent agents cannot later
+    compose their outputs for the same joint even across different fields.
     """
     if action_cfgs is None:
         raise ValueError("action_cfgs cannot be None")
