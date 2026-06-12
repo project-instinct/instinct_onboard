@@ -8,7 +8,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import TrackerAgent
 from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
@@ -119,33 +119,21 @@ class G1TrackingNode(UnitreeNode):
             self.available_agents["tracking"].match_to_current_heading()
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working:
                 self.get_logger().info(
                     "ColdStartAgent done, press 'L1' to switch to tracking agent.", throttle_duration_sec=10.0
                 )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.L1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self.joy_stick_data.L1):
                 self.get_logger().info("L1 button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "tracking":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
+            if status == AgentStatus.Ended:
                 self.get_logger().info("TrackingAgent done, turning off motors.")
                 self._turn_off_motors()
                 sys.exit(0)

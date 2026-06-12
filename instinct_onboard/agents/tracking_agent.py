@@ -14,7 +14,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from tf2_ros import StaticTransformBroadcaster
 
-from instinct_onboard.agents.base import ColdStartAgent, OnboardAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent, OnboardAgent
 from instinct_onboard.normalizer import Normalizer
 from instinct_onboard.ros_nodes.base import RealNode
 from instinct_onboard.utils import (
@@ -176,7 +176,8 @@ class TrackerAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: normalized_obs})[0]
         action = action.reshape(-1)
-        return action, done
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Ended if done else AgentStatus.Working
 
     def match_to_current_heading(self):
         """Match the motion's 0-th frame to the current heading."""
@@ -245,8 +246,8 @@ class TrackerAgent(OnboardAgent):
             startup_step_size=startup_step_size,
             ros_node=self.ros_node,
             joint_target_pos=joint_target_pos,
-            action_scale=self.action_scale,  # Note: passing action_offset here sets _action_offset in ColdStartAgent due to parameter naming in init
-            action_offset=self.action_offset,  # passing action_scale here sets _action_scale
+            # Share action layout with the tracker so last_action / cold-start stay consistent.
+            action_terms=self.action_terms,
             p_gains=self.p_gains * kpkd_factor,
             d_gains=self.d_gains * kpkd_factor,
         )

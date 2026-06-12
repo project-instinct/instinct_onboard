@@ -10,7 +10,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import PerceptiveTrackerAgent, TrackerAgent
 from instinct_onboard.agents.walk_agent import WalkAgent
 from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
@@ -167,40 +167,28 @@ class G1TrackingNode(UnitreeRsCameraNode):
             self.available_agents["tracking"].match_to_current_heading()
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done and ("walk" in self.available_agents.keys()):
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working and ("walk" in self.available_agents.keys()):
                 self.get_logger().info(
                     "ColdStartAgent done, press 'L1' to switch to walk agent.", throttle_duration_sec=10.0
                 )
-            else:
+            elif status != AgentStatus.Working:
                 self.get_logger().info(
                     "ColdStartAgent done, press any direction button to switch to tracking agent.",
                     throttle_duration_sec=10.0,
                 )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.L1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self.joy_stick_data.L1):
                 self.get_logger().info("L1 button pressed, switching to walk agent.")
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            if done and (self.joy_stick_data.up):
+            if status != AgentStatus.Working and (self.joy_stick_data.up):
                 if "walk" in self.available_agents.keys():
                     self.get_logger().warn("up button pressed, but there is a walk agent registered. ignored")
 
         elif self.current_agent_name == "walk":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
             if self.joy_stick_data.up:
                 self.get_logger().info("up button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
@@ -223,26 +211,20 @@ class G1TrackingNode(UnitreeRsCameraNode):
                 self.available_agents[self.current_agent_name].reset("superheroLanding-retargeted.npz")
 
         elif self.current_agent_name == "tracking":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
             if self.joy_stick_data.L1:
                 self.get_logger().info(
                     "L1 button pressed, switching to walk agent (no matter whether the tracking agent is done)."
                 )
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            if done and ("walk" in self.available_agents.keys()):
+            if status == AgentStatus.Ended and ("walk" in self.available_agents.keys()):
                 # switch to walk agent
                 self.get_logger().info("TrackingAgent done, switching to walk agent.")
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            elif done:
+            elif status == AgentStatus.Ended:
                 self.get_logger().info("TrackingAgent done, turning off motors.")
                 self._turn_off_motors()
                 sys.exit(0)
@@ -320,8 +302,7 @@ def main(args):
             startup_step_size=args.startup_step_size,
             ros_node=node,
             joint_target_pos=walk_agent.default_joint_pos,
-            action_scale=walk_agent.action_scale,
-            action_offset=walk_agent.action_offset,
+            action_terms=walk_agent.action_terms,
             p_gains=walk_agent.p_gains * args.kpkd_factor,
             d_gains=walk_agent.d_gains * args.kpkd_factor,
         )

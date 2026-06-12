@@ -256,6 +256,15 @@ class RealNode(Node):
         )
         return True
 
+    # ------------------------------------------------------------------
+    # Deprecated legacy path — schedule for removal.
+    #
+    # Timeline:
+    #   2026-06  All scripts migrated to send_target_joint_state directly.
+    #   2026-09  (planned) Remove send_action, self.NUM_ACTIONS, and
+    #            self.action from RealNode. Any remaining callers must
+    #            convert to send_target_joint_state + TargetJointState.
+    # ------------------------------------------------------------------
     def send_action(
         self,
         action: np.array,

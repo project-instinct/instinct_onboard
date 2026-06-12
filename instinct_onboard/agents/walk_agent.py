@@ -5,7 +5,7 @@ import os
 import numpy as np
 import onnxruntime as ort
 
-from instinct_onboard.agents.base import OnboardAgent
+from instinct_onboard.agents.base import AgentStatus, OnboardAgent
 from instinct_onboard.normalizer import Normalizer
 from instinct_onboard.ros_nodes.base import RealNode
 
@@ -58,8 +58,8 @@ class WalkAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: normalized_obs})[0]
         action = action.reshape(-1)
-        done = False  # Continuous walking, no termination
-        return action, done
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Working
 
     """
     Agent specific observation functions for WalkAgent.

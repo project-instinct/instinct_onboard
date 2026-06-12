@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import time
 from typing import Tuple
 
@@ -16,7 +15,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from tf2_ros import StaticTransformBroadcaster
 
-from instinct_onboard.agents.base import OnboardAgent
+from instinct_onboard.agents.base import AgentStatus, OnboardAgent
 from instinct_onboard.ros_nodes.base import RealNode
 from instinct_onboard.utils import CircularBuffer
 
@@ -77,17 +76,6 @@ class ParkourAgent(OnboardAgent):
         print("Observation functions:")
         print(table)
         self._parse_depth_image_config()
-
-    def _parse_action_config(self):
-        super()._parse_action_config()
-        self._zero_action_joints = np.zeros(self.ros_node.NUM_ACTIONS, dtype=np.float32)
-        for action_names, action_config in self.cfg["actions"].items():
-            for i in range(self.ros_node.NUM_JOINTS):
-                name = self.ros_node.sim_joint_names[i]
-                if "default_joint_names" in action_config:
-                    for _, joint_name_expr in enumerate(action_config["default_joint_names"]):
-                        if re.search(joint_name_expr, name):
-                            self._zero_action_joints[i] = 1.0
 
     def _parse_depth_image_config(self):
         self.output_resolution = [
@@ -216,12 +204,8 @@ class ParkourAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: actor_input})[0]
         action = action.reshape(-1)
-        # reconstruct full action including zeroed joints
-        mask = (self._zero_action_joints == 0).astype(bool)
-        full_action = np.zeros(self.ros_node.NUM_ACTIONS, dtype=np.float32)
-        full_action[mask] = action
-
-        return full_action, False
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Working
 
     """
     Agent specific observation functions for Parkour Agent.
@@ -266,12 +250,6 @@ class ParkourAgent(OnboardAgent):
     def _get_joint_vel_rel_obs(self):
         """Return shape: (num_joints,)"""
         return self.ros_node.joint_vel_
-
-    def _get_last_action_obs(self):
-        """Return shape: (num_active_joints,)"""
-        actions = np.asarray(self.ros_node.action).astype(np.float32)
-        mask = (1.0 - self._zero_action_joints).astype(bool)
-        return actions[mask]
 
     def refresh_depth_frame(self):
         """Return the depth image."""

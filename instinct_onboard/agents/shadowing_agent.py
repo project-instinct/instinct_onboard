@@ -9,7 +9,12 @@ import quaternion
 import yaml
 from geometry_msgs.msg import PoseArray
 
-from instinct_onboard.agents.base import OnboardAgent
+from instinct_onboard.agents.action_term import (
+    JointPositionAction,
+    build_default_uncontrolled_joint_action,
+    get_policy_action_dim,
+)
+from instinct_onboard.agents.base import AgentStatus, OnboardAgent
 from instinct_onboard.ros_nodes.base import RealNode
 from instinct_onboard.utils import quat_to_tan_norm_batch
 from motion_target_msgs.msg import MotionSequence
@@ -122,7 +127,8 @@ class ShadowingAgent(OnboardAgent):
             self.ros_node.packed_motion_sequence_buffer["time_to_target"] < 0.0
         ).all()  # done if all time_to_target are negative
 
-        return action, done
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Ended if done else AgentStatus.Working
 
     """
     Agent specific observation functions for Shadowing Agent.
@@ -254,6 +260,36 @@ class MotionAsActAgent(OnboardAgent):
         # NO parse_obs_config and _load_models because this agent use hand-coded logic.
         self.joint_diff_threshold = joint_diff_threshold
         self.joint_diff_scale = joint_diff_scale
+        self._parse_action_config()
+
+    def _parse_action_config(self):
+        """Use identity full-joint position mapping; ignore ``cfg['actions']`` from the export."""
+        self._load_robot_init_state_and_actuator_pd()
+        self._action_terms = [
+            JointPositionAction(
+                name="motion_as_act_full_joint_position",
+                action_cfg={
+                    "joint_names": [".*"],
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "use_default_offset": False,
+                },
+                ros_node=self.ros_node,
+                default_joint_pos=self.default_joint_pos,
+                p_gains=self._p_gains,
+                d_gains=self._d_gains,
+                action_cursor=0,
+            )
+        ]
+        self._policy_action_dim = get_policy_action_dim(self._action_terms)
+        self._default_uncontrolled_joint_action = build_default_uncontrolled_joint_action(
+            ros_node=self.ros_node,
+            default_joint_pos=self.default_joint_pos,
+            p_gains=self._p_gains,
+            d_gains=self._d_gains,
+            action_terms=self._action_terms,
+        )
+        self._summarize_action_terms()
 
     def reset(self):
         """Reset the agent state and the rosbag reader."""
@@ -270,5 +306,6 @@ class MotionAsActAgent(OnboardAgent):
         )
         print(f"Joint Error max: {np.abs(joint_diff).max():.3f}", end="\r")
         action = command_joint_pos.astype(np.float32)
-        done = not np.any(over_threshold_mask)  # done if all joint positions are within the threshold
-        return action, done
+        reached = not np.any(over_threshold_mask)  # reached if all joint positions are within the threshold
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Reached if reached else AgentStatus.Working

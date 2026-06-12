@@ -8,7 +8,7 @@ from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
 import instinct_onboard.robot_cfgs as robot_cfgs
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.parkour_agent import (
     ParkourAgent,
     ParkourStandAgent,
@@ -156,8 +156,8 @@ class G1ParkourNode(UnitreeRsCameraNode):
             return
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working:
                 if "stand" in self.available_agents.keys():
                     self.get_logger().info(
                         "ColdStartAgent done, press 'R1' to switch to stand agent.", throttle_duration_sec=10.0
@@ -167,42 +167,24 @@ class G1ParkourNode(UnitreeRsCameraNode):
                         "ColdStartAgent done, press any direction button to switch to parkour agent.",
                         throttle_duration_sec=10.0,
                     )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.R1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self.joy_stick_data.R1):
                 self.get_logger().info("R1 button pressed, switching to stand agent.")
                 self.current_agent_name = "stand"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "stand":
-            action, done = self.available_agents[self.current_agent_name].step()
+            tjs, status = self.available_agents[self.current_agent_name].step()
             self.refresh_rs_data()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
+            self.send_target_joint_state(tjs)
             if self.joy_stick_data.L1:
                 self.get_logger().info("L1 button pressed, switching to parkour agent.")
                 self.current_agent_name = "parkour"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "parkour":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
             if self.joy_stick_data.R1:
                 self.get_logger().info("R1 button pressed, switching to stand agent.")
                 self.current_agent_name = "stand"
@@ -257,8 +239,7 @@ def main(args):
         startup_step_size=args.startup_step_size,
         ros_node=node,
         joint_target_pos=parkour_agent.default_joint_pos,
-        action_scale=parkour_agent.action_scale,
-        action_offset=parkour_agent.action_offset,
+        action_terms=parkour_agent.action_terms,
         p_gains=parkour_agent.p_gains * args.kpkd_factor,
         d_gains=parkour_agent.d_gains * args.kpkd_factor,
     )

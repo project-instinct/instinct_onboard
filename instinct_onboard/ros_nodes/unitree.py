@@ -1,10 +1,10 @@
 import numpy as np
 import rclpy
+from crc_module import get_crc
 from unitree_go.msg import WirelessController
 from unitree_hg.msg import IMUState, LowCmd, LowState  # MotorState,; MotorCmd,
 
 import instinct_onboard.robot_cfgs as robot_cfgs
-from crc_module import get_crc
 from instinct_onboard import utils
 from instinct_onboard.ros_nodes.base import RealNode
 
@@ -203,27 +203,35 @@ class UnitreeNode(RealNode):
     def _publish_motor_cmd(
         self,
         target_joint_pos: np.array,  # shape (NUM_JOINTS,), in simulation order
+        target_joint_vel: np.array,  # shape (NUM_JOINTS,), in simulation order
+        target_joint_effort: np.array,  # shape (NUM_JOINTS,), in simulation order
         p_gains: np.ndarray,  # In the order of simulation joints, not real joints
         d_gains: np.ndarray,  # In the order of simulation joints, not real joints
-    ):
+    ) -> bool:
         """Publish the joint commands to the robot motors in robot coordinates system.
-        robot_coordinates_action: shape (NUM_JOINTS,), in simulation order.
+
+        All arrays are in simulation order with shape (NUM_JOINTS,).
+        Returns True on success, False on failure.
         """
+        if np.isnan(target_joint_pos).any() or np.isnan(p_gains).any() or np.isnan(d_gains).any():
+            self.get_logger().error("Motor command arrays contain NaN, skip sending command")
+            return False
+
         for sim_idx in range(self.NUM_JOINTS):
             real_idx = self.joint_map[sim_idx]
             if not self.dryrun:
                 self.low_cmd_buffer.motor_cmd[real_idx].mode = self.turn_on_motor_mode[sim_idx]
             self.low_cmd_buffer.motor_cmd[real_idx].q = (target_joint_pos[sim_idx] * self.joint_signs[sim_idx]).item()
-            self.low_cmd_buffer.motor_cmd[real_idx].dq = 0.0
-            self.low_cmd_buffer.motor_cmd[real_idx].tau = 0.0
+            self.low_cmd_buffer.motor_cmd[real_idx].dq = (target_joint_vel[sim_idx] * self.joint_signs[sim_idx]).item()
+            self.low_cmd_buffer.motor_cmd[real_idx].tau = (
+                target_joint_effort[sim_idx] * self.joint_signs[sim_idx]
+            ).item()
             self.low_cmd_buffer.motor_cmd[real_idx].kp = p_gains[sim_idx].item()
             self.low_cmd_buffer.motor_cmd[real_idx].kd = d_gains[sim_idx].item()
 
         self.low_cmd_buffer.crc = get_crc(self.low_cmd_buffer)
-        if np.isnan(target_joint_pos).any():
-            self.get_logger().error("Robot coordinates action contain NaN, Skip sending the action to the robot.")
-            return
         self.low_cmd_publisher.publish(self.low_cmd_buffer)
+        return True
 
     def _turn_off_motors(self):
         """Turn off the motors"""
