@@ -212,40 +212,13 @@ class ParkourAgent(OnboardAgent):
     """
 
     def _get_base_velocity_cmd_obs(self):
-        """Return shape: (3,)"""
-        # left-y for forward/backward
-        ly = self.ros_node.joy_stick_data.ly
-        if ly > self.lin_vel_deadband:
-            vx = (ly - self.lin_vel_deadband) / (1 - self.lin_vel_deadband)  # (0, 1)
-            vx = vx * (self.cmd_px_range[1] - self.cmd_px_range[0]) + self.cmd_px_range[0]
-        elif ly < -self.lin_vel_deadband:
-            vx = (ly + self.lin_vel_deadband) / (1 - self.lin_vel_deadband)  # (-1, 0)
-            vx = vx * (self.cmd_nx_range[1] - self.cmd_nx_range[0]) - self.cmd_nx_range[0]
-        else:
-            vx = 0
-        # left-x for side moving left/right
-        lx = -self.ros_node.joy_stick_data.lx
-        if lx > self.lin_vel_deadband:
-            vy = (lx - self.lin_vel_deadband) / (1 - self.lin_vel_deadband)
-            vy = vy * (self.cmd_py_range[1] - self.cmd_py_range[0]) + self.cmd_py_range[0]
-        elif lx < -self.lin_vel_deadband:
-            vy = (lx + self.lin_vel_deadband) / (1 - self.lin_vel_deadband)
-            vy = vy * (self.cmd_ny_range[1] - self.cmd_ny_range[0]) - self.cmd_ny_range[0]
-        else:
-            vy = 0
-        # right-x for turning left/right
-        rx = -self.ros_node.joy_stick_data.rx
-        if rx > self.ang_vel_deadband:
-            yaw = (rx - self.ang_vel_deadband) / (1 - self.ang_vel_deadband)
-            yaw = yaw * (self.cmd_pyaw_range[1] - self.cmd_pyaw_range[0]) + self.cmd_pyaw_range[0]
-        elif rx < -self.ang_vel_deadband:
-            yaw = (rx + self.ang_vel_deadband) / (1 - self.ang_vel_deadband)
-            yaw = yaw * (self.cmd_nyaw_range[1] - self.cmd_nyaw_range[0]) - self.cmd_nyaw_range[0]
-        else:
-            yaw = 0
+        """Return shape: (3,) — reads the generic velocity command buffer.
 
-        self.xyyaw_command = np.array([vx, vy, yaw], dtype=np.float32)
-        return self.xyyaw_command
+        The entry script is responsible for populating
+        ``ros_node.base_velocity_cmd`` from the chosen source (joystick,
+        autonomous planner, etc.) before each agent step.
+        """
+        return self.ros_node.base_velocity_cmd
 
     def _get_joint_vel_rel_obs(self):
         """Return shape: (num_joints,)"""

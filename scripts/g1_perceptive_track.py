@@ -13,6 +13,7 @@ from tf2_ros import TransformBroadcaster
 from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import PerceptiveTrackerAgent, TrackerAgent
 from instinct_onboard.agents.walk_agent import WalkAgent
+from instinct_onboard.joystick import UnitreeJoyStick
 from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
@@ -155,6 +156,10 @@ class G1TrackingNode(UnitreeRsCameraNode):
 
     def main_loop_callback(self):
         main_loop_callback_start_time = time.time()
+
+        # Compute base velocity command from joystick for the walk agent.
+        self._update_base_velocity_cmd_from_joystick()
+
         if self.current_agent_name is None:
             self.get_logger().info("Starting cold start agent automatically.")
             self.get_logger().info("Press 'A' button to match motion to current heading.", throttle_duration_sec=2.0)
@@ -162,7 +167,7 @@ class G1TrackingNode(UnitreeRsCameraNode):
             self.available_agents[self.current_agent_name].reset()
             return
 
-        if self.joy_stick_data.A:
+        if self._joystick.data.A:
             self.get_logger().info("A button pressed, matching motion to current heading.", throttle_duration_sec=2.0)
             self.available_agents["tracking"].match_to_current_heading()
 
@@ -178,34 +183,34 @@ class G1TrackingNode(UnitreeRsCameraNode):
                     throttle_duration_sec=10.0,
                 )
             self.send_target_joint_state(tjs)
-            if status != AgentStatus.Working and (self.joy_stick_data.L1):
+            if status != AgentStatus.Working and (self._joystick.data.L1):
                 self.get_logger().info("L1 button pressed, switching to walk agent.")
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            if status != AgentStatus.Working and (self.joy_stick_data.up):
+            if status != AgentStatus.Working and (self._joystick.data.up):
                 if "walk" in self.available_agents.keys():
                     self.get_logger().warn("up button pressed, but there is a walk agent registered. ignored")
 
         elif self.current_agent_name == "walk":
             tjs, status = self.available_agents[self.current_agent_name].step()
             self.send_target_joint_state(tjs)
-            if self.joy_stick_data.up:
+            if self._joystick.data.up:
                 self.get_logger().info("up button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("diveroll4-ziwen-0-retargeted.npz")
-            elif self.joy_stick_data.down:
+            elif self._joystick.data.down:
                 self.get_logger().info("down button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("kneelClimbStep1-x-0.1-ziwen-retargeted.npz")
-            elif self.joy_stick_data.left:
+            elif self._joystick.data.left:
                 self.get_logger().info("left button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("rollVault11-ziwen-retargeted.npz")
-            elif self.joy_stick_data.right:
+            elif self._joystick.data.right:
                 self.get_logger().info("right button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("jumpsit2-ziwen-retargeted.npz")
-            elif self.joy_stick_data.X:
+            elif self._joystick.data.X:
                 self.get_logger().info("right button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("superheroLanding-retargeted.npz")
@@ -213,7 +218,7 @@ class G1TrackingNode(UnitreeRsCameraNode):
         elif self.current_agent_name == "tracking":
             tjs, status = self.available_agents[self.current_agent_name].step()
             self.send_target_joint_state(tjs)
-            if self.joy_stick_data.L1:
+            if self._joystick.data.L1:
                 self.get_logger().info(
                     "L1 button pressed, switching to walk agent (no matter whether the tracking agent is done)."
                 )
@@ -242,6 +247,18 @@ class G1TrackingNode(UnitreeRsCameraNode):
                 )
                 self.main_loop_timer_counter = 0
                 self.main_loop_timer_counter_time = time.time()
+
+    def _update_base_velocity_cmd_from_joystick(self):
+        """Write the joystick-derived velocity command to the generic buffer.
+
+        The walk agent reads ``base_velocity_cmd`` via
+        ``_get_base_velocity_cmd_obs``.  Other agents are free to ignore it.
+        """
+        jy = self._joystick.data
+        x_vel = jy.ly * self._x_vel_scale if jy.ly is not None else 0.0
+        y_vel = -jy.lx * self._y_vel_scale if jy.lx is not None else 0.0
+        yaw_vel = -jy.rx * self._yaw_vel_scale if jy.rx is not None else 0.0
+        self.base_velocity_cmd = np.array([x_vel, y_vel, yaw_vel], dtype=np.float32)
 
     def vis_callback(self):
         agent: PerceptiveTrackerAgent = self.available_agents["tracking"]
@@ -285,6 +302,15 @@ def main(args):
         motion_vis=args.motion_vis,
         dryrun=not args.nodryrun,
     )
+
+    # Wire up the wireless controller (joystick) for agent switching and
+    # velocity commands.  Default safety-shutdown is sufficient.
+    joystick = UnitreeJoyStick(node)
+    node._joystick = joystick
+    # Velocity scales for the walk agent — script writer's choice.
+    node._x_vel_scale = 0.5
+    node._y_vel_scale = 0.5
+    node._yaw_vel_scale = 1.0
 
     tracking_agent = PerceptiveTrackerAgent(
         logdir=args.logdir,

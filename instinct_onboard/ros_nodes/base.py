@@ -1,6 +1,4 @@
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import rclpy
@@ -11,33 +9,6 @@ from tf2_ros import StaticTransformBroadcaster
 
 from instinct_onboard import robot_cfgs
 from instinct_onboard.target_joint_state import TargetJointState
-
-
-@dataclass
-class JoyStickData:
-    # None for not available
-    lx: Optional[float] = None  # + for stick right, - for stick left
-    ly: Optional[float] = None  # + for stick up, - for stick down
-    rx: Optional[float] = None  # + for stick right, - for stick left
-    ry: Optional[float] = None  # + for stick up, - for stick down
-    left_trigger: Optional[float] = None  # + for trigger pressed, - for trigger released, but could be ranging (0, 1)
-    right_trigger: Optional[float] = None  # + for trigger pressed, - for trigger released, but could be ranging (0, 1)
-
-    # True for pressed, False for released
-    up: Optional[bool] = None
-    down: Optional[bool] = None
-    left: Optional[bool] = None
-    right: Optional[bool] = None
-    A: Optional[bool] = None
-    B: Optional[bool] = None
-    X: Optional[bool] = None
-    Y: Optional[bool] = None
-    start: Optional[bool] = None
-    select: Optional[bool] = None
-    L1: Optional[bool] = None
-    L2: Optional[bool] = None
-    R1: Optional[bool] = None
-    R2: Optional[bool] = None
 
 
 class RealNode(Node):
@@ -75,10 +46,10 @@ class RealNode(Node):
         self.torque_limits_ratio = torque_limits_ratio
         self.robot_class_name = robot_class_name
         self.dryrun = dryrun
-        # This is a common joy stick data definition for multi-robot support.
-        # Each OEM node should handle how to convert the raw joy stick data to this common definition.
-        # Each agent should use this interface to acquire joy stick continuous values and button states.
-        self._joy_stick_data = JoyStickData()
+        # Generic base velocity command buffer — populated by the entry script
+        # from whatever source it chooses (joystick, autonomous planner, etc.).
+        # Shape: (3,) = [x_vel, y_vel, yaw_vel].
+        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
 
         self.parse_config()
 
@@ -120,10 +91,6 @@ class RealNode(Node):
         """
         # Common publishers
         self.debug_msg_publisher = self.create_publisher(String, "/debug_msg", 10)
-
-    @property
-    def joy_stick_data(self) -> JoyStickData:
-        return self._joy_stick_data
 
     def publish_auxiliary_static_transforms(self, transform_field_name: str):
         """Publish some additional static transforms that are not part of the robot model.

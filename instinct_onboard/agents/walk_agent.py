@@ -17,15 +17,9 @@ class WalkAgent(OnboardAgent):
         self,
         logdir: str,
         ros_node: RealNode,
-        x_vel_scale: float = 0.5,
-        y_vel_scale: float = 0.5,
-        yaw_vel_scale: float = 1.0,
     ):
         super().__init__(logdir, ros_node)
         self.ort_sessions = dict()
-        self.x_vel_scale = x_vel_scale
-        self.y_vel_scale = y_vel_scale
-        self.yaw_vel_scale = yaw_vel_scale
         self._parse_obs_config()
         self._parse_action_config()
         self._load_models()
@@ -66,8 +60,10 @@ class WalkAgent(OnboardAgent):
     """
 
     def _get_base_velocity_cmd_obs(self):
-        """Return the base velocity command (from joystick)"""
-        x_vel = self.ros_node.joy_stick_data.ly * self.x_vel_scale
-        y_vel = -self.ros_node.joy_stick_data.lx * self.y_vel_scale
-        yaw_vel = -self.ros_node.joy_stick_data.rx * self.yaw_vel_scale
-        return np.array([x_vel, y_vel, yaw_vel])
+        """Return shape: (3,) — reads the generic velocity command buffer.
+
+        The entry script is responsible for populating
+        ``ros_node.base_velocity_cmd`` from the chosen source before each
+        agent step.
+        """
+        return self.ros_node.base_velocity_cmd

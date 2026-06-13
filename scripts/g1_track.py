@@ -10,6 +10,7 @@ from tf2_ros import TransformBroadcaster
 
 from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import TrackerAgent
+from instinct_onboard.joystick import UnitreeJoyStick
 from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 """
@@ -114,7 +115,7 @@ class G1TrackingNode(UnitreeNode):
             self.available_agents[self.current_agent_name].reset()
             return
 
-        if self.joy_stick_data.A:
+        if self._joystick.data.A:
             self.get_logger().info("A button pressed, matching motion to current heading.", throttle_duration_sec=2.0)
             self.available_agents["tracking"].match_to_current_heading()
 
@@ -125,7 +126,7 @@ class G1TrackingNode(UnitreeNode):
                     "ColdStartAgent done, press 'L1' to switch to tracking agent.", throttle_duration_sec=10.0
                 )
             self.send_target_joint_state(tjs)
-            if status != AgentStatus.Working and (self.joy_stick_data.L1):
+            if status != AgentStatus.Working and (self._joystick.data.L1):
                 self.get_logger().info("L1 button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset()
@@ -175,6 +176,10 @@ def main(args):
         robot_class_name="G1_29Dof_TorsoBase",
         dryrun=not args.nodryrun,
     )
+
+    # Wire up the wireless controller (joystick) for agent switching.
+    joystick = UnitreeJoyStick(node)
+    node._joystick = joystick
 
     tracking_agent = TrackerAgent(
         logdir=args.logdir,
