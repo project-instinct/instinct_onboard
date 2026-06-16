@@ -46,10 +46,6 @@ class RealNode(Node):
         self.torque_limits_ratio = torque_limits_ratio
         self.robot_class_name = robot_class_name
         self.dryrun = dryrun
-        # Generic base velocity command buffer — populated by the entry script
-        # from whatever source it chooses (joystick, autonomous planner, etc.).
-        # Shape: (3,) = [x_vel, y_vel, yaw_vel].
-        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
 
         self.parse_config()
 

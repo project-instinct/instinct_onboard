@@ -19,6 +19,13 @@ class WalkAgent(OnboardAgent):
         ros_node: RealNode,
     ):
         super().__init__(logdir, ros_node)
+        if not hasattr(ros_node, "base_velocity_cmd"):
+            raise AttributeError(
+                "ros_node has no attribute 'base_velocity_cmd'. "
+                "The entry script must set this attribute on the node before constructing the agent. "
+                "Example: ros_node.base_velocity_cmd = np.zeros(3, dtype=np.float32) "
+                "and update it each step from joystick, autonomous planner, etc."
+            )
         self.ort_sessions = dict()
         self._parse_obs_config()
         self._parse_action_config()

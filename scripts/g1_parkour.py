@@ -126,10 +126,42 @@ Notes:
 
 
 class G1ParkourNode(UnitreeRsCameraNode):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        lin_vel_deadband: float = 0.5,
+        ang_vel_deadband: float = 0.5,
+        cmd_px_range: tuple = (0.5, 0.5),
+        cmd_nx_range: tuple = (0.0, 0.0),
+        cmd_py_range: tuple = (0.0, 0.0),
+        cmd_ny_range: tuple = (0.0, 0.0),
+        cmd_pyaw_range: tuple = (0.0, 1.0),
+        cmd_nyaw_range: tuple = (0.0, 1.0),
+        joystick_topic: str = "/wirelesscontroller",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.available_agents = dict()
         self.current_agent_name: str | None = None
+
+        # Velocity-control parameters — the script writer decides how velocity
+        # is computed from joystick input.
+        self._lin_vel_deadband = lin_vel_deadband
+        self._ang_vel_deadband = ang_vel_deadband
+        self._cmd_px_range = cmd_px_range
+        self._cmd_nx_range = cmd_nx_range
+        self._cmd_py_range = cmd_py_range
+        self._cmd_ny_range = cmd_ny_range
+        self._cmd_pyaw_range = cmd_pyaw_range
+        self._cmd_nyaw_range = cmd_nyaw_range
+
+        # Wire up the wireless controller (joystick).  The default
+        # safety-shutdown (turn off motors + SystemExit) is sufficient.
+        self._joystick = UnitreeJoyStick(self, joy_stick_topic=joystick_topic)
+
+        # Generic velocity command buffer — populated each main-loop tick
+        # from the joystick.  Agents read it via _get_base_velocity_cmd_obs.
+        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
 
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
@@ -262,23 +294,12 @@ def main(args):
         joint_pos_protect_ratio=2.0,
         robot_class_name="G1_29Dof_TorsoBase",
         dryrun=not args.nodryrun,
+        lin_vel_deadband=args.lin_vel_deadband,
+        ang_vel_deadband=args.ang_vel_deadband,
+        cmd_px_range=args.lin_vel_range,
+        cmd_pyaw_range=args.ang_vel_range,
+        cmd_nyaw_range=args.ang_vel_range,
     )
-
-    # Wire up the wireless controller (joystick).  The default
-    # safety-shutdown (turn off motors + SystemExit) is sufficient.
-    joystick = UnitreeJoyStick(node)
-    node._joystick = joystick
-
-    # Store velocity-control parameters on the node — they moved here from
-    # the agent because the script writer decides how velocity is computed.
-    node._lin_vel_deadband = args.lin_vel_deadband
-    node._ang_vel_deadband = args.ang_vel_deadband
-    node._cmd_px_range = args.lin_vel_range
-    node._cmd_nx_range = [0.0, 0.0]
-    node._cmd_py_range = [0.0, 0.0]
-    node._cmd_ny_range = [0.0, 0.0]
-    node._cmd_pyaw_range = args.ang_vel_range
-    node._cmd_nyaw_range = args.ang_vel_range
 
     stand_agent = ParkourStandAgent(
         logdir=args.standdir,

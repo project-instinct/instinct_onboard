@@ -127,11 +127,33 @@ Notes:
 
 
 class G1TrackingNode(UnitreeRsCameraNode):
-    def __init__(self, *args, motion_vis: bool = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        motion_vis: bool = False,
+        x_vel_scale: float = 0.5,
+        y_vel_scale: float = 0.5,
+        yaw_vel_scale: float = 1.0,
+        joystick_topic: str = "/wirelesscontroller",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.available_agents = dict()
         self.current_agent_name: str | None = None
         self.motion_vis = motion_vis
+
+        # Velocity scales for the walk agent — script writer's choice.
+        self._x_vel_scale = x_vel_scale
+        self._y_vel_scale = y_vel_scale
+        self._yaw_vel_scale = yaw_vel_scale
+
+        # Wire up the wireless controller (joystick) for agent switching and
+        # velocity commands.  Default safety-shutdown is sufficient.
+        self._joystick = UnitreeJoyStick(self, joy_stick_topic=joystick_topic)
+
+        # Generic velocity command buffer — populated each main-loop tick
+        # from the joystick.  Agents read it via _get_base_velocity_cmd_obs.
+        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
 
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
@@ -302,15 +324,6 @@ def main(args):
         motion_vis=args.motion_vis,
         dryrun=not args.nodryrun,
     )
-
-    # Wire up the wireless controller (joystick) for agent switching and
-    # velocity commands.  Default safety-shutdown is sufficient.
-    joystick = UnitreeJoyStick(node)
-    node._joystick = joystick
-    # Velocity scales for the walk agent — script writer's choice.
-    node._x_vel_scale = 0.5
-    node._y_vel_scale = 0.5
-    node._yaw_vel_scale = 1.0
 
     tracking_agent = PerceptiveTrackerAgent(
         logdir=args.logdir,

@@ -36,6 +36,13 @@ class ParkourAgent(OnboardAgent):
         ang_vel_range=[0.0, 1.0],
     ):
         super().__init__(logdir, ros_node)
+        if not hasattr(ros_node, "base_velocity_cmd"):
+            raise AttributeError(
+                "ros_node has no attribute 'base_velocity_cmd'. "
+                "The entry script must set this attribute on the node before constructing the agent. "
+                "Example: ros_node.base_velocity_cmd = np.zeros(3, dtype=np.float32) "
+                "and update it each step from joystick, autonomous planner, etc."
+            )
         self.ort_sessions = dict()
         self.lin_vel_deadband = lin_vel_deadband
         self.ang_vel_deadband = ang_vel_deadband
@@ -145,7 +152,6 @@ class ParkourAgent(OnboardAgent):
                 return
             else:
                 raise ValueError(f"Unknown observation function for observation {obs_name}")
-        self.xyyaw_command = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         return super()._parse_observation_function(obs_name, obs_config)
 
     def _load_models(self):
