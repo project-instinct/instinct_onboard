@@ -166,6 +166,12 @@ class G1ParkourNode(UnitreeRsCameraNode):
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
 
+    def check_buffers_ready(self):
+        """Also wait for the first wireless-controller message before the main loop."""
+        if not super().check_buffers_ready():
+            return False
+        return self._joystick.data.ly is not None
+
     def start_ros_handlers(self):
         super().start_ros_handlers()
         # build the joint state publisher and base_link tf publisher
