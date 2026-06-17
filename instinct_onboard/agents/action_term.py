@@ -577,10 +577,9 @@ def parse_action_cfgs(
     intentionally allows two terms to control the **same joint** when they write
     **different** target fields (e.g. position vs. velocity). This is valid for
     a single agent whose model training may design for joint-multiplexed
-    control. Note however that this does **not** support multi-agent
-    composition: :meth:`TargetJointState.__add__` enforces disjoint
-    ``enable_mask`` at the joint level, so two independent agents cannot later
-    compose their outputs for the same joint even across different fields.
+    control. Aggregation uses :meth:`TargetJointState.merge` which resolves
+    ``kp``/``kd`` overlaps by taking the element-wise maximum, so two terms
+    targeting different value fields on the same joint compose correctly.
     """
     if action_cfgs is None:
         raise ValueError("action_cfgs cannot be None")
@@ -729,8 +728,10 @@ def pack_policy_action_to_target_joint_state(
 ) -> TargetJointState:
     """Update each term with its slice and combine their TargetJointState outputs.
 
-    Explicit ``action_terms`` are aggregated via :meth:`TargetJointState.__add__`,
-    which enforces that their enable_masks are disjoint.
+    Explicit ``action_terms`` are aggregated via :meth:`TargetJointState.merge`,
+    which allows the same joint to be targeted through **different** value
+    fields (e.g. position + velocity) and resolves ``kp``/``kd`` overlaps by
+    taking the element-wise maximum.
 
     ``default_uncontrolled_joint_action`` (if provided, typically built by
     :func:`build_default_uncontrolled_joint_action`) is composed last via
@@ -750,7 +751,7 @@ def pack_policy_action_to_target_joint_state(
     for term in action_terms:
         term.update(action_values[term.action_slice])
         term_tjs = term.to_target_joint_state()
-        aggregate = term_tjs if aggregate is None else aggregate + term_tjs
+        aggregate = term_tjs if aggregate is None else aggregate.merge(term_tjs)
     if default_uncontrolled_joint_action is not None:
         default_tjs = default_uncontrolled_joint_action.to_target_joint_state()
         if aggregate is None:

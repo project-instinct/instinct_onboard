@@ -16,8 +16,13 @@ class TargetJointState:
     A joint with ``effort == 0 and kp == 0 and kd == 0`` is treated as
     "not commanded" by this object (see ``enable_mask``).
 
-    ``__add__`` combines two non-overlapping ``TargetJointState``s by
-    field-wise addition, provided their ``enable_mask``s are disjoint.
+    ``__add__`` combines two non-overlapping ``TargetJointState``\\s by
+    field-wise addition, provided their ``enable_mask``\\s are disjoint.
+
+    ``merge(other)`` combines two ``TargetJointState``\\s that may target
+    the same joints through **different** value fields (position, velocity,
+    effort). It checks per-field overlap on those three value fields and
+    resolves ``kp``/``kd`` overlaps by taking the element-wise maximum.
 
     ``fill_disabled_from(other)`` is an overlay op: joints where
     ``self.enable_mask == False`` take their values from ``other``; joints
@@ -117,6 +122,40 @@ class TargetJointState:
             effort=self.effort + other.effort,
             kp=self.kp + other.kp,
             kd=self.kd + other.kd,
+        )
+
+    def merge(self, other: TargetJointState) -> TargetJointState:
+        """Combine two ``TargetJointState``\\s that may target the same joints
+        through **different** value fields (position, velocity, effort).
+
+        Unlike :meth:`__add__`, this does **not** require disjoint
+        ``enable_mask``\\s. Instead it checks per-field overlap on the three
+        *value* fields (position, velocity, effort) and resolves ``kp``/``kd``
+        overlaps by taking the element-wise maximum — those fields are auxiliary
+        control parameters that multiple term types (e.g. position + velocity) may
+        legitimately set on the same joint.
+
+        Raises ``ValueError`` when the same value field is non-zero at the same
+        joint in both operands — that indicates a genuine write conflict and
+        should be caught at config-parsing time by
+        :func:`~instinct_onboard.agents.action_term.parse_action_cfgs`.
+        """
+        if self.num_joints != other.num_joints:
+            raise ValueError("The number of joints in two target joint states must be the same.")
+        for field in ("position", "velocity", "effort"):
+            s = getattr(self, field)
+            o = getattr(other, field)
+            if ((s != 0) & (o != 0)).any():
+                raise ValueError(
+                    f"Cannot merge: value field '{field}' has non-zero overlap "
+                    f"between the two TargetJointState operands."
+                )
+        return TargetJointState(
+            position=self.position + other.position,
+            velocity=self.velocity + other.velocity,
+            effort=self.effort + other.effort,
+            kp=np.maximum(self.kp, other.kp),
+            kd=np.maximum(self.kd, other.kd),
         )
 
     def fill_disabled_from(self, other: TargetJointState) -> TargetJointState:
