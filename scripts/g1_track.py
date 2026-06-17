@@ -8,8 +8,9 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import TrackerAgent
+from instinct_onboard.joystick import UnitreeJoyStick
 from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 """
@@ -93,6 +94,12 @@ class G1TrackingNode(UnitreeNode):
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
 
+    def check_buffers_ready(self):
+        """Also wait for the first wireless-controller message before the main loop."""
+        if not super().check_buffers_ready():
+            return False
+        return self._joystick.data.ly is not None
+
     def start_ros_handlers(self):
         super().start_ros_handlers()
         # build the joint state publisher and base_link tf publisher
@@ -114,38 +121,26 @@ class G1TrackingNode(UnitreeNode):
             self.available_agents[self.current_agent_name].reset()
             return
 
-        if self.joy_stick_data.A:
+        if self._joystick.data.A:
             self.get_logger().info("A button pressed, matching motion to current heading.", throttle_duration_sec=2.0)
             self.available_agents["tracking"].match_to_current_heading()
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working:
                 self.get_logger().info(
                     "ColdStartAgent done, press 'L1' to switch to tracking agent.", throttle_duration_sec=10.0
                 )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.L1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self._joystick.data.L1):
                 self.get_logger().info("L1 button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "tracking":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
+            if status == AgentStatus.Ended:
                 self.get_logger().info("TrackingAgent done, turning off motors.")
                 self._turn_off_motors()
                 sys.exit(0)
@@ -187,6 +182,10 @@ def main(args):
         robot_class_name="G1_29Dof_TorsoBase",
         dryrun=not args.nodryrun,
     )
+
+    # Wire up the wireless controller (joystick) for agent switching.
+    joystick = UnitreeJoyStick(node)
+    node._joystick = joystick
 
     tracking_agent = TrackerAgent(
         logdir=args.logdir,

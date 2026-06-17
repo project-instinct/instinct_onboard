@@ -8,11 +8,12 @@ from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
 import instinct_onboard.robot_cfgs as robot_cfgs
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.parkour_agent import (
     ParkourAgent,
     ParkourStandAgent,
 )
+from instinct_onboard.joystick import UnitreeJoyStick
 from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
@@ -125,13 +126,51 @@ Notes:
 
 
 class G1ParkourNode(UnitreeRsCameraNode):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        lin_vel_deadband: float = 0.5,
+        ang_vel_deadband: float = 0.5,
+        cmd_px_range: tuple = (0.5, 0.5),
+        cmd_nx_range: tuple = (0.0, 0.0),
+        cmd_py_range: tuple = (0.0, 0.0),
+        cmd_ny_range: tuple = (0.0, 0.0),
+        cmd_pyaw_range: tuple = (0.0, 1.0),
+        cmd_nyaw_range: tuple = (0.0, 1.0),
+        joystick_topic: str = "/wirelesscontroller",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.available_agents = dict()
         self.current_agent_name: str | None = None
 
+        # Velocity-control parameters — the script writer decides how velocity
+        # is computed from joystick input.
+        self._lin_vel_deadband = lin_vel_deadband
+        self._ang_vel_deadband = ang_vel_deadband
+        self._cmd_px_range = cmd_px_range
+        self._cmd_nx_range = cmd_nx_range
+        self._cmd_py_range = cmd_py_range
+        self._cmd_ny_range = cmd_ny_range
+        self._cmd_pyaw_range = cmd_pyaw_range
+        self._cmd_nyaw_range = cmd_nyaw_range
+
+        # Wire up the wireless controller (joystick).  The default
+        # safety-shutdown (turn off motors + SystemExit) is sufficient.
+        self._joystick = UnitreeJoyStick(self, joy_stick_topic=joystick_topic)
+
+        # Generic velocity command buffer — populated each main-loop tick
+        # from the joystick.  Agents read it via _get_base_velocity_cmd_obs.
+        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
+
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
+
+    def check_buffers_ready(self):
+        """Also wait for the first wireless-controller message before the main loop."""
+        if not super().check_buffers_ready():
+            return False
+        return self._joystick.data.ly is not None
 
     def start_ros_handlers(self):
         super().start_ros_handlers()
@@ -149,6 +188,12 @@ class G1ParkourNode(UnitreeRsCameraNode):
 
     def main_loop_callback(self):
         main_loop_callback_start_time = time.time()
+
+        # Compute base velocity command from joystick (or any other source the
+        # script writer chooses) and write it to the generic ros_node buffer so
+        # the agent can read it via _get_base_velocity_cmd_obs.
+        self.base_velocity_cmd = self._compute_velocity_from_joystick()
+
         if self.current_agent_name is None:
             self.get_logger().info("Starting cold start agent automatically.")
             self.current_agent_name = "cold_start"
@@ -156,8 +201,8 @@ class G1ParkourNode(UnitreeRsCameraNode):
             return
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working:
                 if "stand" in self.available_agents.keys():
                     self.get_logger().info(
                         "ColdStartAgent done, press 'R1' to switch to stand agent.", throttle_duration_sec=10.0
@@ -167,43 +212,25 @@ class G1ParkourNode(UnitreeRsCameraNode):
                         "ColdStartAgent done, press any direction button to switch to parkour agent.",
                         throttle_duration_sec=10.0,
                     )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.R1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self._joystick.data.R1):
                 self.get_logger().info("R1 button pressed, switching to stand agent.")
                 self.current_agent_name = "stand"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "stand":
-            action, done = self.available_agents[self.current_agent_name].step()
+            tjs, status = self.available_agents[self.current_agent_name].step()
             self.refresh_rs_data()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if self.joy_stick_data.L1:
+            self.send_target_joint_state(tjs)
+            if self._joystick.data.L1:
                 self.get_logger().info("L1 button pressed, switching to parkour agent.")
                 self.current_agent_name = "parkour"
                 self.available_agents[self.current_agent_name].reset()
 
         elif self.current_agent_name == "parkour":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if self.joy_stick_data.R1:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
+            if self._joystick.data.R1:
                 self.get_logger().info("R1 button pressed, switching to stand agent.")
                 self.current_agent_name = "stand"
                 self.available_agents[self.current_agent_name].reset()
@@ -222,6 +249,46 @@ class G1ParkourNode(UnitreeRsCameraNode):
                 self.main_loop_timer_counter = 0
                 self.main_loop_timer_counter_time = time.time()
 
+    def _compute_velocity_from_joystick(self) -> np.ndarray:
+        """Compute [vx, vy, yaw] from the wireless controller axes.
+
+        This is the script writer's decision — other scripts may use a
+        different mapping or source entirely.  The result is written to
+        ``self.base_velocity_cmd`` so the agent picks it up.
+        """
+        jy = self._joystick.data
+        # left-y for forward/backward
+        ly = jy.ly
+        if ly > self._lin_vel_deadband:
+            vx = (ly - self._lin_vel_deadband) / (1 - self._lin_vel_deadband)
+            vx = vx * (self._cmd_px_range[1] - self._cmd_px_range[0]) + self._cmd_px_range[0]
+        elif ly < -self._lin_vel_deadband:
+            vx = (ly + self._lin_vel_deadband) / (1 - self._lin_vel_deadband)
+            vx = vx * (self._cmd_nx_range[1] - self._cmd_nx_range[0]) - self._cmd_nx_range[0]
+        else:
+            vx = 0.0
+        # left-x for side moving left/right
+        lx = -jy.lx
+        if lx > self._lin_vel_deadband:
+            vy = (lx - self._lin_vel_deadband) / (1 - self._lin_vel_deadband)
+            vy = vy * (self._cmd_py_range[1] - self._cmd_py_range[0]) + self._cmd_py_range[0]
+        elif lx < -self._lin_vel_deadband:
+            vy = (lx + self._lin_vel_deadband) / (1 - self._lin_vel_deadband)
+            vy = vy * (self._cmd_ny_range[1] - self._cmd_ny_range[0]) - self._cmd_ny_range[0]
+        else:
+            vy = 0.0
+        # right-x for turning left/right
+        rx = -jy.rx
+        if rx > self._ang_vel_deadband:
+            yaw = (rx - self._ang_vel_deadband) / (1 - self._ang_vel_deadband)
+            yaw = yaw * (self._cmd_pyaw_range[1] - self._cmd_pyaw_range[0]) + self._cmd_pyaw_range[0]
+        elif rx < -self._ang_vel_deadband:
+            yaw = (rx + self._ang_vel_deadband) / (1 - self._ang_vel_deadband)
+            yaw = yaw * (self._cmd_nyaw_range[1] - self._cmd_nyaw_range[0]) - self._cmd_nyaw_range[0]
+        else:
+            yaw = 0.0
+        return np.array([vx, vy, yaw], dtype=np.float32)
+
 
 def main(args):
     rclpy.init()
@@ -233,6 +300,11 @@ def main(args):
         joint_pos_protect_ratio=2.0,
         robot_class_name="G1_29Dof_TorsoBase",
         dryrun=not args.nodryrun,
+        lin_vel_deadband=args.lin_vel_deadband,
+        ang_vel_deadband=args.ang_vel_deadband,
+        cmd_px_range=args.lin_vel_range,
+        cmd_pyaw_range=args.ang_vel_range,
+        cmd_nyaw_range=args.ang_vel_range,
     )
 
     stand_agent = ParkourStandAgent(
@@ -246,10 +318,6 @@ def main(args):
         ros_node=node,
         depth_vis=args.depth_vis,
         pointcloud_vis=args.pointcloud_vis,
-        lin_vel_deadband=args.lin_vel_deadband,
-        lin_vel_range=args.lin_vel_range,
-        ang_vel_deadband=args.ang_vel_deadband,
-        ang_vel_range=args.ang_vel_range,
     )
     node.register_agent("parkour", parkour_agent)
 
@@ -257,8 +325,7 @@ def main(args):
         startup_step_size=args.startup_step_size,
         ros_node=node,
         joint_target_pos=parkour_agent.default_joint_pos,
-        action_scale=parkour_agent.action_scale,
-        action_offset=parkour_agent.action_offset,
+        action_terms=parkour_agent.action_terms,
         p_gains=parkour_agent.p_gains * args.kpkd_factor,
         d_gains=parkour_agent.d_gains * args.kpkd_factor,
     )

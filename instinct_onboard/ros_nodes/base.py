@@ -1,42 +1,14 @@
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray, String
+from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster
 
 from instinct_onboard import robot_cfgs
-
-
-@dataclass
-class JoyStickData:
-    # None for not available
-    lx: Optional[float] = None  # + for stick right, - for stick left
-    ly: Optional[float] = None  # + for stick up, - for stick down
-    rx: Optional[float] = None  # + for stick right, - for stick left
-    ry: Optional[float] = None  # + for stick up, - for stick down
-    left_trigger: Optional[float] = None  # + for trigger pressed, - for trigger released, but could be ranging (0, 1)
-    right_trigger: Optional[float] = None  # + for trigger pressed, - for trigger released, but could be ranging (0, 1)
-
-    # True for pressed, False for released
-    up: Optional[bool] = None
-    down: Optional[bool] = None
-    left: Optional[bool] = None
-    right: Optional[bool] = None
-    A: Optional[bool] = None
-    B: Optional[bool] = None
-    X: Optional[bool] = None
-    Y: Optional[bool] = None
-    start: Optional[bool] = None
-    select: Optional[bool] = None
-    L1: Optional[bool] = None
-    L2: Optional[bool] = None
-    R1: Optional[bool] = None
-    R2: Optional[bool] = None
+from instinct_onboard.target_joint_state import TargetJointState
 
 
 class RealNode(Node):
@@ -65,7 +37,6 @@ class RealNode(Node):
             raise ValueError("robot_class_name must be provided")
 
         self.NUM_JOINTS = getattr(robot_cfgs, robot_class_name).NUM_JOINTS
-        self.NUM_ACTIONS = getattr(robot_cfgs, robot_class_name).NUM_ACTIONS
         self.computer_clip_torque = computer_clip_torque
         self.joint_pos_protect_ratio = joint_pos_protect_ratio
         self.kp_factor = kp_factor
@@ -75,10 +46,6 @@ class RealNode(Node):
         self.torque_limits_ratio = torque_limits_ratio
         self.robot_class_name = robot_class_name
         self.dryrun = dryrun
-        # This is a common joy stick data definition for multi-robot support.
-        # Each OEM node should handle how to convert the raw joy stick data to this common definition.
-        # Each agent should use this interface to acquire joy stick continuous values and button states.
-        self._joy_stick_data = JoyStickData()
 
         self.parse_config()
 
@@ -100,8 +67,7 @@ class RealNode(Node):
         )  # in robot urdf coordinate, but in simulation order. no offset subtracted
         self.joint_vel_ = np.zeros(self.NUM_JOINTS, dtype=np.float32)
 
-        # action buffer
-        self.action = np.zeros(self.NUM_ACTIONS, dtype=np.float32)
+        self.last_sent_target_joint_state: TargetJointState | None = None
 
         # hardware related, in simulation order
         self.joint_signs = getattr(
@@ -121,11 +87,6 @@ class RealNode(Node):
         """
         # Common publishers
         self.debug_msg_publisher = self.create_publisher(String, "/debug_msg", 10)
-        self.action_publisher = self.create_publisher(Float32MultiArray, "/raw_actions", 10)
-
-    @property
-    def joy_stick_data(self) -> JoyStickData:
-        return self._joy_stick_data
 
     def publish_auxiliary_static_transforms(self, transform_field_name: str):
         """Publish some additional static transforms that are not part of the robot model.
@@ -170,9 +131,6 @@ class RealNode(Node):
         """
         return self.joint_vel_ - np.zeros(self.NUM_JOINTS, dtype=np.float32)  # shape (NUM_JOINTS,)
 
-    def _get_last_action_obs(self):
-        return self.action  # shape (NUM_ACTIONS,)
-
     """
     Functions that actually publish the commands and take effect
     """
@@ -193,42 +151,71 @@ class RealNode(Node):
 
         return np.clip(target_joint_pos, action_low, action_high)
 
-    def send_action(
-        self,
-        action: np.array,
-        action_offset: np.array = 0.0,
-        action_scale: np.ndarray = 1.0,
-        p_gains: np.ndarray = 0.0,
-        d_gains: np.ndarray = 0.0,
-    ):
-        """Send the action to the robot motors, which does the preprocessing
-        just like env.step in simulation.
-        However, since this process only controls one robot, the action is not batched.
-        NOTE: when switching between agents, the last_action term should be shared between agents.
-        Thus, the ros node has to update the action buffer
+    def send_target_joint_state(self, target_joint_state: TargetJointState) -> bool:
+        """Publish a full-size TargetJointState to the hardware.
+
+        The incoming ``target_joint_state`` is expected to be full-size (``num_joints ==
+        NUM_JOINTS``); agents build it by aggregating per-joint action terms and a
+        default-PD term, so no defaults need to be merged here. On success,
+        ``last_sent_target_joint_state`` is updated so observations can replay the
+        last command.
         """
-        # NOTE: Only calling this function currently will update self.actions for self._get_last_action_obs
-        self.action[:] = action
-        self.action_publisher.publish(Float32MultiArray(data=action))
-        action_scaled = action * action_scale
-        target_joint_pos = action_scaled + action_offset
-        p_gains = np.clip(p_gains * self.kp_factor, 0.0, self.kp_clip)
-        d_gains = np.clip(d_gains * self.kd_factor, 0.0, self.kd_clip)
-        if np.isnan(action).any():
-            self.get_logger().error("Actions contain NaN, Skip sending the action to the robot.")
-            return
+        if len(target_joint_state) != self.NUM_JOINTS:
+            self.get_logger().error(
+                f"TargetJointState num_joints mismatch: expected {self.NUM_JOINTS}, got {target_joint_state.num_joints}"
+            )
+            return False
+
+        if target_joint_state.isnan_any:
+            self.get_logger().error("Target joint state contains NaN, skip sending command.")
+            return False
+
+        target_joint_state = target_joint_state.as_dtype(np.float32)
+
+        p_gains = np.clip(target_joint_state.kp * self.kp_factor, 0.0, self.kp_clip)
+        d_gains = np.clip(target_joint_state.kd * self.kd_factor, 0.0, self.kd_clip)
+        target_joint_pos_send = target_joint_state.position.copy()
         if self.computer_clip_torque:
-            target_joint_pos = self.clip_by_torque_limit(
-                target_joint_pos,
+            target_joint_pos_send = self.clip_by_torque_limit(
+                target_joint_pos_send,
                 p_gains=p_gains,
                 d_gains=d_gains,
             )
-        self._publish_motor_cmd(target_joint_pos, p_gains=p_gains, d_gains=d_gains)
+            if (target_joint_pos_send != target_joint_state.position).any():
+                self.get_logger().info("Action clipped by torque limits.")
+
+        send_ok = self._publish_motor_cmd(
+            target_joint_pos=target_joint_pos_send,
+            target_joint_vel=target_joint_state.velocity,
+            target_joint_effort=target_joint_state.effort,
+            p_gains=p_gains,
+            d_gains=d_gains,
+        )
+        if not send_ok:
+            return False
+
+        self.last_sent_target_joint_state = TargetJointState(
+            position=target_joint_state.position.copy(),
+            velocity=target_joint_state.velocity.copy(),
+            effort=target_joint_state.effort.copy(),
+            kp=target_joint_state.kp.copy(),
+            kd=target_joint_state.kd.copy(),
+        )
+        return True
 
     @abstractmethod
-    def _publish_motor_cmd(self, target_joint_pos: np.array, p_gains: np.array, d_gains: np.array):
+    def _publish_motor_cmd(
+        self,
+        target_joint_pos: np.array,
+        target_joint_vel: np.array,
+        target_joint_effort: np.array,
+        p_gains: np.ndarray,
+        d_gains: np.ndarray,
+    ) -> bool:
         """Publish the joint commands to the robot motors in robot coordinates system.
-        robot_coordinates_action: shape (NUM_JOINTS,), in simulation order.
+
+        All arrays are in simulation order with shape (NUM_JOINTS,).
+        Returns True on success, False on failure (e.g. NaN values).
         """
         pass
 

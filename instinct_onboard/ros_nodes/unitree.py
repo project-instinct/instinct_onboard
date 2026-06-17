@@ -1,23 +1,29 @@
 import numpy as np
 import rclpy
-from unitree_go.msg import WirelessController
+from crc_module import get_crc
 from unitree_hg.msg import IMUState, LowCmd, LowState  # MotorState,; MotorCmd,
 
 import instinct_onboard.robot_cfgs as robot_cfgs
-from crc_module import get_crc
 from instinct_onboard import utils
 from instinct_onboard.ros_nodes.base import RealNode
 
 
 class UnitreeNode(RealNode):
-    """This is the implementation of the Unitree robot ROS interface."""
+    """This is the implementation of the Unitree robot ROS interface.
+
+    .. note::
+        Joystick / wireless-controller support is no longer built into this
+        class.  Use :class:`~instinct_onboard.joystick.unitree.UnitreeJoyStick`
+        in your entry script if you need joystick control.  The entry script
+        should read ``joystick.data`` directly and write the derived velocity
+        command into :attr:`RealNode.base_velocity_cmd` before each agent step.
+    """
 
     def __init__(
         self,
         low_state_topic: str = "/lowstate",
         low_cmd_topic: str = "/lowcmd",
         imu_state_topic: str = "/secondary_imu",
-        joy_stick_topic: str = "/wirelesscontroller",
         **kwargs,
     ):
         super().__init__(node_name="unitree_node", **kwargs)
@@ -27,7 +33,6 @@ class UnitreeNode(RealNode):
         self.low_cmd_topic = (
             low_cmd_topic if not self.dryrun else low_cmd_topic + "_dryrun_" + str(np.random.randint(0, 65535))
         )
-        self.joy_stick_topic = joy_stick_topic
 
     def parse_config(self):
         super().parse_config()
@@ -53,12 +58,7 @@ class UnitreeNode(RealNode):
         self.torso_imu_subscriber = self.create_subscription(
             IMUState, self.imu_state_topic, self._torso_imu_state_callback, 10
         )
-        self.joy_stick_subscriber = self.create_subscription(
-            WirelessController, self.joy_stick_topic, self._joy_stick_callback, 10
-        )
-        self.get_logger().info(
-            "ROS handlers started, waiting to receive critical low state and wireless controller messages."
-        )
+        self.get_logger().info("ROS handlers started, waiting to receive critical low state messages.")
         if not self.dryrun:
             self.get_logger().warn(
                 f"You are running the code in no-dryrun mode and publishing to '{self.low_cmd_topic}', Please keep"
@@ -77,7 +77,7 @@ class UnitreeNode(RealNode):
 
     def check_buffers_ready(self):
         """Check if all the necessary buffers are ready to use. Only used at the the end of the start_ros_handlers."""
-        buffer_ready = hasattr(self, "low_state_buffer") and self.joy_stick_data.lx is not None
+        buffer_ready = hasattr(self, "low_state_buffer")
         if self.imu_state_topic is not None:
             buffer_ready = buffer_ready and hasattr(self, "torso_imu_buffer")
         return buffer_ready
@@ -118,41 +118,6 @@ class UnitreeNode(RealNode):
         """store and handle torso imu data"""
         self.get_logger().info("Torso IMU data received.", once=True)
         self.torso_imu_buffer = msg
-
-    def _joy_stick_callback(self, msg):
-        self.get_logger().info("Wireless controller data received.", once=True)
-        # fill the joy stick data
-        self.joy_stick_data.A = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.A)
-        self.joy_stick_data.B = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.B)
-        self.joy_stick_data.X = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.X)
-        self.joy_stick_data.Y = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.Y)
-        self.joy_stick_data.start = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.start)
-        self.joy_stick_data.select = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.select)
-        self.joy_stick_data.L1 = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.L1)
-        self.joy_stick_data.R1 = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.R1)
-        self.joy_stick_data.L2 = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.L2)
-        self.joy_stick_data.R2 = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.R2)
-        self.joy_stick_data.up = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.up)
-        self.joy_stick_data.down = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.down)
-        self.joy_stick_data.left = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.left)
-        self.joy_stick_data.right = bool(msg.keys & robot_cfgs.UnitreeWirelessButtons.right)
-        # fill the joy stick data
-        self.joy_stick_data.lx = msg.lx
-        self.joy_stick_data.ly = msg.ly
-        self.joy_stick_data.rx = msg.rx
-        self.joy_stick_data.ry = msg.ry
-        # left/right trigger is not available in Unitree Wireless Controller
-
-        # refer to Unitree Remote Control data structure, msg.keys is a bit mask
-        # 00000000 00000001 means pressing the 0-th button (R1)
-        # 00000000 00000010 means pressing the 1-th button (L1)
-        # 10000000 00000000 means pressing the 15-th button (left)
-        if (msg.keys & robot_cfgs.UnitreeWirelessButtons.R2) or (
-            msg.keys & robot_cfgs.UnitreeWirelessButtons.L2
-        ):  # R2 or L2 is pressed
-            self.get_logger().warn("R2 or L2 is pressed, the motors and this process shuts down.")
-            self._turn_off_motors()
-            raise SystemExit()
 
     """
     Refresh observation buffer and corresponding sub-functions
@@ -203,27 +168,35 @@ class UnitreeNode(RealNode):
     def _publish_motor_cmd(
         self,
         target_joint_pos: np.array,  # shape (NUM_JOINTS,), in simulation order
+        target_joint_vel: np.array,  # shape (NUM_JOINTS,), in simulation order
+        target_joint_effort: np.array,  # shape (NUM_JOINTS,), in simulation order
         p_gains: np.ndarray,  # In the order of simulation joints, not real joints
         d_gains: np.ndarray,  # In the order of simulation joints, not real joints
-    ):
+    ) -> bool:
         """Publish the joint commands to the robot motors in robot coordinates system.
-        robot_coordinates_action: shape (NUM_JOINTS,), in simulation order.
+
+        All arrays are in simulation order with shape (NUM_JOINTS,).
+        Returns True on success, False on failure.
         """
+        if np.isnan(target_joint_pos).any() or np.isnan(p_gains).any() or np.isnan(d_gains).any():
+            self.get_logger().error("Motor command arrays contain NaN, skip sending command")
+            return False
+
         for sim_idx in range(self.NUM_JOINTS):
             real_idx = self.joint_map[sim_idx]
             if not self.dryrun:
                 self.low_cmd_buffer.motor_cmd[real_idx].mode = self.turn_on_motor_mode[sim_idx]
             self.low_cmd_buffer.motor_cmd[real_idx].q = (target_joint_pos[sim_idx] * self.joint_signs[sim_idx]).item()
-            self.low_cmd_buffer.motor_cmd[real_idx].dq = 0.0
-            self.low_cmd_buffer.motor_cmd[real_idx].tau = 0.0
+            self.low_cmd_buffer.motor_cmd[real_idx].dq = (target_joint_vel[sim_idx] * self.joint_signs[sim_idx]).item()
+            self.low_cmd_buffer.motor_cmd[real_idx].tau = (
+                target_joint_effort[sim_idx] * self.joint_signs[sim_idx]
+            ).item()
             self.low_cmd_buffer.motor_cmd[real_idx].kp = p_gains[sim_idx].item()
             self.low_cmd_buffer.motor_cmd[real_idx].kd = d_gains[sim_idx].item()
 
         self.low_cmd_buffer.crc = get_crc(self.low_cmd_buffer)
-        if np.isnan(target_joint_pos).any():
-            self.get_logger().error("Robot coordinates action contain NaN, Skip sending the action to the robot.")
-            return
         self.low_cmd_publisher.publish(self.low_cmd_buffer)
+        return True
 
     def _turn_off_motors(self):
         """Turn off the motors"""

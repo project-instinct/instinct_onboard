@@ -10,9 +10,10 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import PerceptiveTrackerAgent, TrackerAgent
 from instinct_onboard.agents.walk_agent import WalkAgent
+from instinct_onboard.joystick import UnitreeJoyStick
 from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
@@ -126,14 +127,42 @@ Notes:
 
 
 class G1TrackingNode(UnitreeRsCameraNode):
-    def __init__(self, *args, motion_vis: bool = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        motion_vis: bool = False,
+        x_vel_scale: float = 0.5,
+        y_vel_scale: float = 0.5,
+        yaw_vel_scale: float = 1.0,
+        joystick_topic: str = "/wirelesscontroller",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.available_agents = dict()
         self.current_agent_name: str | None = None
         self.motion_vis = motion_vis
 
+        # Velocity scales for the walk agent — script writer's choice.
+        self._x_vel_scale = x_vel_scale
+        self._y_vel_scale = y_vel_scale
+        self._yaw_vel_scale = yaw_vel_scale
+
+        # Wire up the wireless controller (joystick) for agent switching and
+        # velocity commands.  Default safety-shutdown is sufficient.
+        self._joystick = UnitreeJoyStick(self, joy_stick_topic=joystick_topic)
+
+        # Generic velocity command buffer — populated each main-loop tick
+        # from the joystick.  Agents read it via _get_base_velocity_cmd_obs.
+        self.base_velocity_cmd = np.zeros(3, dtype=np.float32)
+
     def register_agent(self, name: str, agent):
         self.available_agents[name] = agent
+
+    def check_buffers_ready(self):
+        """Also wait for the first wireless-controller message before the main loop."""
+        if not super().check_buffers_ready():
+            return False
+        return self._joystick.data.ly is not None
 
     def start_ros_handlers(self):
         super().start_ros_handlers()
@@ -155,6 +184,10 @@ class G1TrackingNode(UnitreeRsCameraNode):
 
     def main_loop_callback(self):
         main_loop_callback_start_time = time.time()
+
+        # Compute base velocity command from joystick for the walk agent.
+        self._update_base_velocity_cmd_from_joystick()
+
         if self.current_agent_name is None:
             self.get_logger().info("Starting cold start agent automatically.")
             self.get_logger().info("Press 'A' button to match motion to current heading.", throttle_duration_sec=2.0)
@@ -162,87 +195,69 @@ class G1TrackingNode(UnitreeRsCameraNode):
             self.available_agents[self.current_agent_name].reset()
             return
 
-        if self.joy_stick_data.A:
+        if self._joystick.data.A:
             self.get_logger().info("A button pressed, matching motion to current heading.", throttle_duration_sec=2.0)
             self.available_agents["tracking"].match_to_current_heading()
 
         elif self.current_agent_name == "cold_start":
-            action, done = self.available_agents[self.current_agent_name].step()
-            if done and ("walk" in self.available_agents.keys()):
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            if status != AgentStatus.Working and ("walk" in self.available_agents.keys()):
                 self.get_logger().info(
                     "ColdStartAgent done, press 'L1' to switch to walk agent.", throttle_duration_sec=10.0
                 )
-            else:
+            elif status != AgentStatus.Working:
                 self.get_logger().info(
                     "ColdStartAgent done, press any direction button to switch to tracking agent.",
                     throttle_duration_sec=10.0,
                 )
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if done and (self.joy_stick_data.L1):
+            self.send_target_joint_state(tjs)
+            if status != AgentStatus.Working and (self._joystick.data.L1):
                 self.get_logger().info("L1 button pressed, switching to walk agent.")
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            if done and (self.joy_stick_data.up):
+            if status != AgentStatus.Working and (self._joystick.data.up):
                 if "walk" in self.available_agents.keys():
                     self.get_logger().warn("up button pressed, but there is a walk agent registered. ignored")
 
         elif self.current_agent_name == "walk":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if self.joy_stick_data.up:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
+            if self._joystick.data.up:
                 self.get_logger().info("up button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("diveroll4-ziwen-0-retargeted.npz")
-            elif self.joy_stick_data.down:
+            elif self._joystick.data.down:
                 self.get_logger().info("down button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("kneelClimbStep1-x-0.1-ziwen-retargeted.npz")
-            elif self.joy_stick_data.left:
+            elif self._joystick.data.left:
                 self.get_logger().info("left button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("rollVault11-ziwen-retargeted.npz")
-            elif self.joy_stick_data.right:
+            elif self._joystick.data.right:
                 self.get_logger().info("right button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("jumpsit2-ziwen-retargeted.npz")
-            elif self.joy_stick_data.X:
+            elif self._joystick.data.X:
                 self.get_logger().info("right button pressed, switching to tracking agent.")
                 self.current_agent_name = "tracking"
                 self.available_agents[self.current_agent_name].reset("superheroLanding-retargeted.npz")
 
         elif self.current_agent_name == "tracking":
-            action, done = self.available_agents[self.current_agent_name].step()
-            self.send_action(
-                action,
-                self.available_agents[self.current_agent_name].action_offset,
-                self.available_agents[self.current_agent_name].action_scale,
-                self.available_agents[self.current_agent_name].p_gains,
-                self.available_agents[self.current_agent_name].d_gains,
-            )
-            if self.joy_stick_data.L1:
+            tjs, status = self.available_agents[self.current_agent_name].step()
+            self.send_target_joint_state(tjs)
+            if self._joystick.data.L1:
                 self.get_logger().info(
                     "L1 button pressed, switching to walk agent (no matter whether the tracking agent is done)."
                 )
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            if done and ("walk" in self.available_agents.keys()):
+            if status == AgentStatus.Ended and ("walk" in self.available_agents.keys()):
                 # switch to walk agent
                 self.get_logger().info("TrackingAgent done, switching to walk agent.")
                 self.current_agent_name = "walk"
                 self.available_agents[self.current_agent_name].reset()
-            elif done:
+            elif status == AgentStatus.Ended:
                 self.get_logger().info("TrackingAgent done, turning off motors.")
                 self._turn_off_motors()
                 sys.exit(0)
@@ -260,6 +275,18 @@ class G1TrackingNode(UnitreeRsCameraNode):
                 )
                 self.main_loop_timer_counter = 0
                 self.main_loop_timer_counter_time = time.time()
+
+    def _update_base_velocity_cmd_from_joystick(self):
+        """Write the joystick-derived velocity command to the generic buffer.
+
+        The walk agent reads ``base_velocity_cmd`` via
+        ``_get_base_velocity_cmd_obs``.  Other agents are free to ignore it.
+        """
+        jy = self._joystick.data
+        x_vel = jy.ly * self._x_vel_scale if jy.ly is not None else 0.0
+        y_vel = -jy.lx * self._y_vel_scale if jy.lx is not None else 0.0
+        yaw_vel = -jy.rx * self._yaw_vel_scale if jy.rx is not None else 0.0
+        self.base_velocity_cmd = np.array([x_vel, y_vel, yaw_vel], dtype=np.float32)
 
     def vis_callback(self):
         agent: PerceptiveTrackerAgent = self.available_agents["tracking"]
@@ -320,8 +347,7 @@ def main(args):
             startup_step_size=args.startup_step_size,
             ros_node=node,
             joint_target_pos=walk_agent.default_joint_pos,
-            action_scale=walk_agent.action_scale,
-            action_offset=walk_agent.action_offset,
+            action_terms=walk_agent.action_terms,
             p_gains=walk_agent.p_gains * args.kpkd_factor,
             d_gains=walk_agent.d_gains * args.kpkd_factor,
         )

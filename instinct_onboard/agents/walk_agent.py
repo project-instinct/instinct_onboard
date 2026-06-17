@@ -5,7 +5,7 @@ import os
 import numpy as np
 import onnxruntime as ort
 
-from instinct_onboard.agents.base import OnboardAgent
+from instinct_onboard.agents.base import AgentStatus, OnboardAgent
 from instinct_onboard.normalizer import Normalizer
 from instinct_onboard.ros_nodes.base import RealNode
 
@@ -17,15 +17,16 @@ class WalkAgent(OnboardAgent):
         self,
         logdir: str,
         ros_node: RealNode,
-        x_vel_scale: float = 0.5,
-        y_vel_scale: float = 0.5,
-        yaw_vel_scale: float = 1.0,
     ):
         super().__init__(logdir, ros_node)
+        if not hasattr(ros_node, "base_velocity_cmd"):
+            raise AttributeError(
+                "ros_node has no attribute 'base_velocity_cmd'. "
+                "The entry script must set this attribute on the node before constructing the agent. "
+                "Example: ros_node.base_velocity_cmd = np.zeros(3, dtype=np.float32) "
+                "and update it each step from joystick, autonomous planner, etc."
+            )
         self.ort_sessions = dict()
-        self.x_vel_scale = x_vel_scale
-        self.y_vel_scale = y_vel_scale
-        self.yaw_vel_scale = yaw_vel_scale
         self._parse_obs_config()
         self._parse_action_config()
         self._load_models()
@@ -58,20 +59,18 @@ class WalkAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: normalized_obs})[0]
         action = action.reshape(-1)
-        done = False  # Continuous walking, no termination
-        return action, done
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Working
 
     """
     Agent specific observation functions for WalkAgent.
     """
 
-    def _get_base_velocity_command_cmd_obs(self):
-        """Return the base velocity command (from joystick)"""
-        x_vel = self.ros_node.joy_stick_data.ly * self.x_vel_scale
-        y_vel = -self.ros_node.joy_stick_data.lx * self.y_vel_scale
-        yaw_vel = -self.ros_node.joy_stick_data.rx * self.yaw_vel_scale
-        return np.array([x_vel, y_vel, yaw_vel])
-
     def _get_base_velocity_cmd_obs(self):
-        """An alias for _get_base_velocity_command_obs"""
-        return self._get_base_velocity_command_cmd_obs()
+        """Return shape: (3,) — reads the generic velocity command buffer.
+
+        The entry script is responsible for populating
+        ``ros_node.base_velocity_cmd`` from the chosen source before each
+        agent step.
+        """
+        return self.ros_node.base_velocity_cmd

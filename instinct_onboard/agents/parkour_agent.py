@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import time
 from typing import Tuple
 
@@ -16,7 +15,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from tf2_ros import StaticTransformBroadcaster
 
-from instinct_onboard.agents.base import OnboardAgent
+from instinct_onboard.agents.base import AgentStatus, OnboardAgent
 from instinct_onboard.ros_nodes.base import RealNode
 from instinct_onboard.utils import CircularBuffer
 
@@ -37,6 +36,13 @@ class ParkourAgent(OnboardAgent):
         ang_vel_range=[0.0, 1.0],
     ):
         super().__init__(logdir, ros_node)
+        if not hasattr(ros_node, "base_velocity_cmd"):
+            raise AttributeError(
+                "ros_node has no attribute 'base_velocity_cmd'. "
+                "The entry script must set this attribute on the node before constructing the agent. "
+                "Example: ros_node.base_velocity_cmd = np.zeros(3, dtype=np.float32) "
+                "and update it each step from joystick, autonomous planner, etc."
+            )
         self.ort_sessions = dict()
         self.lin_vel_deadband = lin_vel_deadband
         self.ang_vel_deadband = ang_vel_deadband
@@ -77,17 +83,6 @@ class ParkourAgent(OnboardAgent):
         print("Observation functions:")
         print(table)
         self._parse_depth_image_config()
-
-    def _parse_action_config(self):
-        super()._parse_action_config()
-        self._zero_action_joints = np.zeros(self.ros_node.NUM_ACTIONS, dtype=np.float32)
-        for action_names, action_config in self.cfg["actions"].items():
-            for i in range(self.ros_node.NUM_JOINTS):
-                name = self.ros_node.sim_joint_names[i]
-                if "default_joint_names" in action_config:
-                    for _, joint_name_expr in enumerate(action_config["default_joint_names"]):
-                        if re.search(joint_name_expr, name):
-                            self._zero_action_joints[i] = 1.0
 
     def _parse_depth_image_config(self):
         self.output_resolution = [
@@ -157,7 +152,6 @@ class ParkourAgent(OnboardAgent):
                 return
             else:
                 raise ValueError(f"Unknown observation function for observation {obs_name}")
-        self.xyyaw_command = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         return super()._parse_observation_function(obs_name, obs_config)
 
     def _load_models(self):
@@ -216,62 +210,25 @@ class ParkourAgent(OnboardAgent):
         actor_input_name = self.ort_sessions["actor"].get_inputs()[0].name
         action = self.ort_sessions["actor"].run(None, {actor_input_name: actor_input})[0]
         action = action.reshape(-1)
-        # reconstruct full action including zeroed joints
-        mask = (self._zero_action_joints == 0).astype(bool)
-        full_action = np.zeros(self.ros_node.NUM_ACTIONS, dtype=np.float32)
-        full_action[mask] = action
-
-        return full_action, False
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Working
 
     """
     Agent specific observation functions for Parkour Agent.
     """
 
-    def _get_base_velocity_obs(self):
-        """Return shape: (3,)"""
-        # left-y for forward/backward
-        ly = self.ros_node.joy_stick_data.ly
-        if ly > self.lin_vel_deadband:
-            vx = (ly - self.lin_vel_deadband) / (1 - self.lin_vel_deadband)  # (0, 1)
-            vx = vx * (self.cmd_px_range[1] - self.cmd_px_range[0]) + self.cmd_px_range[0]
-        elif ly < -self.lin_vel_deadband:
-            vx = (ly + self.lin_vel_deadband) / (1 - self.lin_vel_deadband)  # (-1, 0)
-            vx = vx * (self.cmd_nx_range[1] - self.cmd_nx_range[0]) - self.cmd_nx_range[0]
-        else:
-            vx = 0
-        # left-x for side moving left/right
-        lx = -self.ros_node.joy_stick_data.lx
-        if lx > self.lin_vel_deadband:
-            vy = (lx - self.lin_vel_deadband) / (1 - self.lin_vel_deadband)
-            vy = vy * (self.cmd_py_range[1] - self.cmd_py_range[0]) + self.cmd_py_range[0]
-        elif lx < -self.lin_vel_deadband:
-            vy = (lx + self.lin_vel_deadband) / (1 - self.lin_vel_deadband)
-            vy = vy * (self.cmd_ny_range[1] - self.cmd_ny_range[0]) - self.cmd_ny_range[0]
-        else:
-            vy = 0
-        # right-x for turning left/right
-        rx = -self.ros_node.joy_stick_data.rx
-        if rx > self.ang_vel_deadband:
-            yaw = (rx - self.ang_vel_deadband) / (1 - self.ang_vel_deadband)
-            yaw = yaw * (self.cmd_pyaw_range[1] - self.cmd_pyaw_range[0]) + self.cmd_pyaw_range[0]
-        elif rx < -self.ang_vel_deadband:
-            yaw = (rx + self.ang_vel_deadband) / (1 - self.ang_vel_deadband)
-            yaw = yaw * (self.cmd_nyaw_range[1] - self.cmd_nyaw_range[0]) - self.cmd_nyaw_range[0]
-        else:
-            yaw = 0
+    def _get_base_velocity_cmd_obs(self):
+        """Return shape: (3,) — reads the generic velocity command buffer.
 
-        self.xyyaw_command = np.array([vx, vy, yaw], dtype=np.float32)
-        return self.xyyaw_command
+        The entry script is responsible for populating
+        ``ros_node.base_velocity_cmd`` from the chosen source (joystick,
+        autonomous planner, etc.) before each agent step.
+        """
+        return self.ros_node.base_velocity_cmd
 
     def _get_joint_vel_rel_obs(self):
         """Return shape: (num_joints,)"""
         return self.ros_node.joint_vel_
-
-    def _get_last_action_obs(self):
-        """Return shape: (num_active_joints,)"""
-        actions = np.asarray(self.ros_node.action).astype(np.float32)
-        mask = (1.0 - self._zero_action_joints).astype(bool)
-        return actions[mask]
 
     def refresh_depth_frame(self):
         """Return the depth image."""

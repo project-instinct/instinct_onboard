@@ -1,9 +1,10 @@
 import os
 
+import numpy as np
 import rclpy
 import yaml
 
-from instinct_onboard.agents.base import ColdStartAgent
+from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 
@@ -23,14 +24,8 @@ class ExampleNode(UnitreeNode):
         # For example, you could publish messages, process incoming data, etc.
         self.get_logger().info("ExampleNode main loop is running.", throttle_duration_sec=5.0)
         # You can also call agent methods here if needed.
-        action, done = self.agent.step()
-        self.send_action(
-            action,
-            action_offset=self.agent.action_offset,
-            action_scale=self.agent.action_scale,
-            p_gains=self.agent.p_gains,
-            d_gains=self.agent.d_gains,
-        )
+        tjs, status = self.agent.step()
+        self.send_target_joint_state(tjs)
 
 
 def main(args):
@@ -42,7 +37,11 @@ def main(args):
         cfg = yaml.unsafe_load(f)
     node = ExampleNode(cfg=cfg, dryrun=not args.nodryrun)
 
-    agent = ColdStartAgent(startup_step_size=0.2, ros_node=node)
+    agent = ColdStartAgent(
+        startup_step_size=0.2,
+        ros_node=node,
+        joint_target_pos=np.zeros(node.NUM_JOINTS, dtype=np.float32),
+    )
     node.agent = agent
 
     node.start_ros_handlers()
