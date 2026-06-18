@@ -13,6 +13,7 @@ This a rule starting point for most agents. The `AGENTS.md` file should guide th
 - do not go out-side of the project folder without explicitly asking (once will do)
 - always log the current progress in `PROGRESS.md` if the file is present
 - avoid worktrees in `pip install -e .` repos unless the import path is verified, because Python may still run the original source tree.
+- avoid modifying the logic code if updating configuration values will solve the issue.
 
 ## Code of Conduct Following Linus's Coding Taste
 This is a primary engineering constraint, not a style preference.
