@@ -24,10 +24,11 @@ from instinct_onboard.utils import CircularBuffer
 
 
 class AgentStatus(IntEnum):
+    Refused = -1  # The agent refused to run (e.g. due to invalid initial state).
     Working = 0  # The agent is currently working but no specific status to report.
     Reached = 1  # The agent has reached the designated state and is holding.
-    Ended = 2  # The agent has completed its task.
-    Failed = 3  # The agent has failed to complete its task.
+    Ended = 2  # The agent has completed its task and dropping control.
+    Failed = 3  # The agent has failed to complete its task and dropping control.
 
 
 class OnboardAgent(ABC):
