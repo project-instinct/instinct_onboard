@@ -8,11 +8,15 @@ import time
 from typing import Literal
 
 import numpy as np
-import pyrealsense2 as rs
+
+try:
+    import pyrealsense2 as rs
+except ImportError:
+    raise ImportError(
+        "pyrealsense2 is required for RealSense camera support. " "Install it via: `pip install pyrealsense2`"
+    )
 
 from instinct_onboard.utils import _depth_to_ros_pointcloud_msg
-
-from .unitree import UnitreeNode
 
 REALSENSE_PROCESS_FREQUENCY_CHECK_INTERVAL = 500
 
@@ -259,7 +263,3 @@ class RsCameraNodeMixin:
             self.rs_shared_memory.unlink()
             self.rs_shared_memory = None
         super().destroy_node()
-
-
-class UnitreeRsCameraNode(RsCameraNodeMixin, UnitreeNode):
-    pass

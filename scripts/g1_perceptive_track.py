@@ -14,7 +14,8 @@ from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import PerceptiveTrackerAgent, TrackerAgent
 from instinct_onboard.agents.walk_agent import WalkAgent
 from instinct_onboard.joystick import UnitreeJoyStick
-from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
+from instinct_onboard.ros_nodes.realsense import RsCameraNodeMixin
+from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
 
@@ -126,7 +127,7 @@ Notes:
 """
 
 
-class G1TrackingNode(UnitreeRsCameraNode):
+class G1TrackingNode(RsCameraNodeMixin, UnitreeNode):
     def __init__(
         self,
         *args,
