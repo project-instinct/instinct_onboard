@@ -366,7 +366,8 @@ class PerceptiveTrackerAgent(TrackerAgent):
                 + self.depth_image_clip_range[0]
             )
             self.debug_pointcloud_publisher.publish(pointcloud_msg)
-        return action, done
+        target_joint_state = self.pack_policy_action_to_target_joint_state(action)
+        return target_joint_state, AgentStatus.Ended if done else AgentStatus.Working
 
     """
     Agent specific observation functions for PerceptiveTrackerAgent.
