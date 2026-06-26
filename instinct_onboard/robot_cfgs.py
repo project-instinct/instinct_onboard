@@ -262,7 +262,7 @@ class G1_29Dof_TorsoBase:
         https://support.unitree.com/home/zh/G1_developer/basic_services_interface
         https://github.com/unitreerobotics/unitree_ros/tree/master/robots/g1_description
     """
-    realsense_depth_link_transform = {
+    camera_depth_link_transform = {
         "translation": (
             0.04764571478 + 0.0039635 - 0.0042 * math.cos(math.radians(48)),
             0.015,
@@ -275,5 +275,5 @@ class G1_29Dof_TorsoBase:
             0.0,  # z
         ),
         "parent_frame": "torso_link",
-        "child_frame": "realsense_depth_link",
+        "child_frame": "camera_depth_link",
     }

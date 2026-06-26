@@ -286,7 +286,7 @@ class PerceptiveTrackerAgent(TrackerAgent):
         sim_crop_region = self.cfg["scene"]["camera"]["noise_pipeline"]["crop_and_resize"][
             "crop_region"
         ]  # up, down, left, right
-        real_resolution = self.ros_node.rs_resolution  # (width, height)
+        real_resolution = self.ros_node.depth_resolution  # (width, height)
         real_crop_region = (
             int(sim_crop_region[0] * real_resolution[1] / sim_resolution_before_crop[1]),  # up
             int(sim_crop_region[1] * real_resolution[1] / sim_resolution_before_crop[1]),  # down
@@ -358,7 +358,7 @@ class PerceptiveTrackerAgent(TrackerAgent):
             )
             depth_image_msg = rnp.msgify(Image, depth_image_msg_data, encoding="16UC1")
             depth_image_msg.header.stamp = self.ros_node.get_clock().now().to_msg()
-            depth_image_msg.header.frame_id = "realsense_depth_link"
+            depth_image_msg.header.frame_id = "camera_depth_link"
             self.debug_depth_publisher.publish(depth_image_msg)
         if self.debug_pointcloud_publisher is not None:
             pointcloud_msg = self.ros_node.depth_image_to_pointcloud_msg(
@@ -374,8 +374,8 @@ class PerceptiveTrackerAgent(TrackerAgent):
 
     def _get_visualizable_image_obs(self):
         """Return the depth image."""
-        self.ros_node.refresh_rs_data()
-        depth_image: np.ndarray = self.ros_node.rs_depth_data
+        self.ros_node.refresh_camera_data()
+        depth_image: np.ndarray = self.ros_node.get_depth_image()
         # normalize based on given range
         depth_image = np.clip(depth_image, self.depth_image_clip_range[0], self.depth_image_clip_range[1])
         if self.depth_image_shall_normalize:
