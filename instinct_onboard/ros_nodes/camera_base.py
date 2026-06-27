@@ -190,7 +190,7 @@ def camera_subprocess_func(
         os.sched_setaffinity(os.getpid(), affinity)
 
     # -- instantiate the camera in this subprocess ---------------------------
-    camera = camera_cls(
+    camera: CameraBase = camera_cls(
         depth_resolution=depth_resolution,
         color_resolution=color_resolution,
         **camera_kwargs,
@@ -265,6 +265,7 @@ def camera_subprocess_func(
             if depth_terminated and color_terminated:
                 break
     finally:
+        camera.destroy_node()
         if depth_shm is not None:
             depth_shm.close()
         if color_shm is not None:
@@ -454,6 +455,12 @@ class CameraProcessSpawner(CameraBase):
         """Check camera process health and act according to ``camera_dead_behavior``."""
         if self.camera_process is not None and self.camera_process.is_alive():
             return
+        # kill that process in memory if it is dead.
+        if self.camera_process is not None:
+            # join() is safe here: is_alive() already returned False above,
+            # so the OS has already exited the process and waitpid is instant.
+            self.camera_process.join()
+            self.camera_process = None
         if self.camera_dead_behavior == "restart":
             self._try_log("error", "Camera process is not alive. Restarting.")
             self.start_process()
