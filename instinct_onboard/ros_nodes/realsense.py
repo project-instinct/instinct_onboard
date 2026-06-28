@@ -108,6 +108,7 @@ class RealsenseCamera(CameraBase):
         """Stop the RealSense pipeline, then chain up."""
         if self.pipeline is not None:
             self.pipeline.stop()
+            self.pipeline = None
         super().destroy_node()
 
 
