@@ -21,9 +21,6 @@ from instinct_onboard.utils import CircularBuffer
 
 
 class ParkourAgent(OnboardAgent):
-    rs_resolution = (480, 270)
-    rs_frequency = 60
-
     def __init__(
         self,
         logdir: str,
@@ -120,8 +117,9 @@ class ParkourAgent(OnboardAgent):
             else self.output_resolution[1]
         )
         # For sample resize
-        square_size = int(self.rs_resolution[0] // self.output_resolution[0])
-        rows, cols = self.rs_resolution[1], self.rs_resolution[0]
+        ros_depth_resolution = self.ros_node.depth_resolution  # (width, height) from CameraBase
+        square_size = int(ros_depth_resolution[0] // self.output_resolution[0])
+        rows, cols = ros_depth_resolution[1], ros_depth_resolution[0]
         center_y_coords = np.arange(self.output_resolution[1]) * square_size + square_size // 2
         center_x_coords = np.arange(self.output_resolution[0]) * square_size + square_size // 2
         y_grid, x_grid = np.meshgrid(center_y_coords, center_x_coords, indexing="ij")
@@ -138,10 +136,11 @@ class ParkourAgent(OnboardAgent):
             + 1
         )
         sim_frequency = int(1 / self.cfg["scene"]["camera"]["update_period"])
-        real_downsample_factor = int(self.rs_frequency / sim_frequency * downsample_factor)
+        depth_fps = self.ros_node.depth_fps  # from CameraBase
+        real_downsample_factor = int(depth_fps / sim_frequency * downsample_factor)
         self.depth_obs_indices = np.linspace(-1 - real_downsample_factor * (frames - 1), -1, frames).astype(int)
         print(f"Depth observation downsample indices: {self.depth_obs_indices}")
-        self.depth_image_buffer = CircularBuffer(length=self.rs_frequency)
+        self.depth_image_buffer = CircularBuffer(length=depth_fps)
 
     def _parse_observation_function(self, obs_name, obs_config):
         obs_func = obs_config["func"].split(":")[-1]  # get the function name from the config
@@ -193,7 +192,7 @@ class ParkourAgent(OnboardAgent):
             )
             depth_image_msg = rnp.msgify(Image, depth_image_msg_data, encoding="16UC1")
             depth_image_msg.header.stamp = self.ros_node.get_clock().now().to_msg()
-            depth_image_msg.header.frame_id = "realsense_depth_link"
+            depth_image_msg.header.frame_id = "camera_depth_link"
             self.debug_depth_publisher.publish(depth_image_msg)
         if self.debug_pointcloud_publisher is not None:
             pointcloud_msg = self.ros_node.depth_image_to_pointcloud_msg(
@@ -232,8 +231,8 @@ class ParkourAgent(OnboardAgent):
 
     def refresh_depth_frame(self):
         """Return the depth image."""
-        self.ros_node.refresh_rs_data()
-        depth_image_np: np.ndarray = self.ros_node.rs_depth_data
+        self.ros_node.refresh_camera_data()
+        depth_image_np: np.ndarray = self.ros_node.get_depth_image()
         # normalize based on given range
         depth_image = cv2.resize(depth_image_np, self.output_resolution, interpolation=cv2.INTER_NEAREST)
 

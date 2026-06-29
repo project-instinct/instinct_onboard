@@ -14,7 +14,8 @@ from instinct_onboard.agents.parkour_agent import (
     ParkourStandAgent,
 )
 from instinct_onboard.joystick import UnitreeJoyStick
-from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
+from instinct_onboard.ros_nodes.realsense import RealsenseMPCamera
+from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
 
@@ -125,7 +126,7 @@ Notes:
 """
 
 
-class G1ParkourNode(UnitreeRsCameraNode):
+class G1ParkourNode(RealsenseMPCamera, UnitreeNode):
     def __init__(
         self,
         *args,
@@ -220,7 +221,7 @@ class G1ParkourNode(UnitreeRsCameraNode):
 
         elif self.current_agent_name == "stand":
             tjs, status = self.available_agents[self.current_agent_name].step()
-            self.refresh_rs_data()
+            self.refresh_camera_data()
             self.send_target_joint_state(tjs)
             if self._joystick.data.L1:
                 self.get_logger().info("L1 button pressed, switching to parkour agent.")
@@ -294,9 +295,8 @@ def main(args):
     rclpy.init()
 
     node = G1ParkourNode(
-        rs_resolution=(480, 270),  # (width, height)
-        rs_fps=60,
-        camera_individual_process=True,
+        depth_resolution=(480, 270),  # (width, height)
+        depth_fps=60,
         joint_pos_protect_ratio=2.0,
         robot_class_name="G1_29Dof_TorsoBase",
         dryrun=not args.nodryrun,
@@ -332,7 +332,7 @@ def main(args):
     node.register_agent("cold_start", cold_start_agent)
 
     if args.depth_vis or args.pointcloud_vis:
-        node.publish_auxiliary_static_transforms("realsense_depth_link_transform")
+        node.publish_auxiliary_static_transforms("camera_depth_link_transform")
 
     node.start_ros_handlers()
     node.get_logger().info("G1ParkourNode is ready to run.")

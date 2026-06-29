@@ -14,7 +14,8 @@ from instinct_onboard.agents.base import AgentStatus, ColdStartAgent
 from instinct_onboard.agents.tracking_agent import PerceptiveTrackerAgent, TrackerAgent
 from instinct_onboard.agents.walk_agent import WalkAgent
 from instinct_onboard.joystick import UnitreeJoyStick
-from instinct_onboard.ros_nodes.realsense import UnitreeRsCameraNode
+from instinct_onboard.ros_nodes.realsense import RealsenseMPCamera
+from instinct_onboard.ros_nodes.unitree import UnitreeNode
 
 MAIN_LOOP_FREQUENCY_CHECK_INTERVAL = 500
 
@@ -126,7 +127,7 @@ Notes:
 """
 
 
-class G1TrackingNode(UnitreeRsCameraNode):
+class G1TrackingNode(RealsenseMPCamera, UnitreeNode):
     def __init__(
         self,
         *args,
@@ -322,9 +323,8 @@ def main(args):
     rclpy.init()
 
     node = G1TrackingNode(
-        rs_resolution=(480, 270),  # (width, height)
-        rs_fps=60,
-        camera_individual_process=True,
+        depth_resolution=(480, 270),  # (width, height)
+        depth_fps=60,
         joint_pos_protect_ratio=2.0,
         robot_class_name="G1_29Dof_TorsoBase",
         motion_vis=args.motion_vis,
@@ -356,7 +356,7 @@ def main(args):
         cold_start_agent = tracking_agent.get_cold_start_agent(args.startup_step_size, args.kpkd_factor)
 
     if args.depth_vis or args.pointcloud_vis:
-        node.publish_auxiliary_static_transforms("realsense_depth_link_transform")
+        node.publish_auxiliary_static_transforms("camera_depth_link_transform")
 
     node.register_agent("cold_start", cold_start_agent)
     node.register_agent("tracking", tracking_agent)
